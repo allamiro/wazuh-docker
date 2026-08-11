@@ -73,7 +73,10 @@ services:
       ingest1.indexer:
         condition: service_healthy
     networks:
-      - siem
+      siem:
+        # static IP: nginx stream upstreams resolve DNS only at startup;
+        # a stable address survives container recreation
+        ipv4_address: 10.77.0.11
   wazuh.worker1:
     image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.worker1
@@ -118,7 +121,10 @@ services:
       wazuh.master:
         condition: service_started
     networks:
-      - siem
+      siem:
+        # static IP: nginx stream upstreams resolve DNS only at startup;
+        # a stable address survives container recreation
+        ipv4_address: 10.77.0.12
   wazuh.worker2:
     image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.worker2
@@ -163,7 +169,10 @@ services:
       wazuh.master:
         condition: service_started
     networks:
-      - siem
+      siem:
+        # static IP: nginx stream upstreams resolve DNS only at startup;
+        # a stable address survives container recreation
+        ipv4_address: 10.77.0.13
   wazuh.worker3:
     image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.worker3
@@ -208,7 +217,10 @@ services:
       wazuh.master:
         condition: service_started
     networks:
-      - siem
+      siem:
+        # static IP: nginx stream upstreams resolve DNS only at startup;
+        # a stable address survives container recreation
+        ipv4_address: 10.77.0.14
   wazuh.worker4:
     image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.worker4
@@ -253,17 +265,30 @@ services:
       wazuh.master:
         condition: service_started
     networks:
-      - siem
+      siem:
+        # static IP: nginx stream upstreams resolve DNS only at startup;
+        # a stable address survives container recreation
+        ipv4_address: 10.77.0.15
   # ---------------------------------------------------------------------------
   # Indexer cluster
   # ---------------------------------------------------------------------------
   master1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: master1.indexer
     container_name: master1.indexer
     restart: always
+    cpu_shares: ${IDX_MASTER_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP:-512m} -Xmx${IDX_MASTER_HEAP:-512m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP_MIN:-${IDX_MASTER_HEAP:-512m}} -Xmx${IDX_MASTER_HEAP:-512m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -283,23 +308,35 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-master1:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/master1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/master1.indexer.key
       - ./config/wazuh_indexer_ssl_certs/master1.indexer.pem:/usr/share/wazuh-indexer/config/certs/master1.indexer.pem
       - ./config/wazuh_indexer_ssl_certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
       - ./config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
-      - ./config/wazuh_indexer/master1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/master1.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   master2.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: master2.indexer
     container_name: master2.indexer
     restart: always
+    cpu_shares: ${IDX_MASTER_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP:-512m} -Xmx${IDX_MASTER_HEAP:-512m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP_MIN:-${IDX_MASTER_HEAP:-512m}} -Xmx${IDX_MASTER_HEAP:-512m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -319,21 +356,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-master2:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/master2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/master2.indexer.key
       - ./config/wazuh_indexer_ssl_certs/master2.indexer.pem:/usr/share/wazuh-indexer/config/certs/master2.indexer.pem
-      - ./config/wazuh_indexer/master2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/master2.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   master3.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: master3.indexer
     container_name: master3.indexer
     restart: always
+    cpu_shares: ${IDX_MASTER_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP:-512m} -Xmx${IDX_MASTER_HEAP:-512m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP_MIN:-${IDX_MASTER_HEAP:-512m}} -Xmx${IDX_MASTER_HEAP:-512m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -353,21 +402,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-master3:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/master3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/master3.indexer.key
       - ./config/wazuh_indexer_ssl_certs/master3.indexer.pem:/usr/share/wazuh-indexer/config/certs/master3.indexer.pem
-      - ./config/wazuh_indexer/master3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/master3.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   hot1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: hot1.indexer
     container_name: hot1.indexer
     restart: always
+    cpu_shares: ${IDX_HOT_CPU_SHARES:-2048}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP:-1536m} -Xmx${IDX_HOT_HEAP:-1536m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP_MIN:-${IDX_HOT_HEAP:-1536m}} -Xmx${IDX_HOT_HEAP:-1536m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -387,21 +448,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-hot1:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/hot1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/hot1.indexer.key
       - ./config/wazuh_indexer_ssl_certs/hot1.indexer.pem:/usr/share/wazuh-indexer/config/certs/hot1.indexer.pem
-      - ./config/wazuh_indexer/hot1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/hot1.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   hot2.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: hot2.indexer
     container_name: hot2.indexer
     restart: always
+    cpu_shares: ${IDX_HOT_CPU_SHARES:-2048}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP:-1536m} -Xmx${IDX_HOT_HEAP:-1536m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP_MIN:-${IDX_HOT_HEAP:-1536m}} -Xmx${IDX_HOT_HEAP:-1536m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -421,21 +494,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-hot2:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/hot2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/hot2.indexer.key
       - ./config/wazuh_indexer_ssl_certs/hot2.indexer.pem:/usr/share/wazuh-indexer/config/certs/hot2.indexer.pem
-      - ./config/wazuh_indexer/hot2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/hot2.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   hot3.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: hot3.indexer
     container_name: hot3.indexer
     restart: always
+    cpu_shares: ${IDX_HOT_CPU_SHARES:-2048}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP:-1536m} -Xmx${IDX_HOT_HEAP:-1536m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP_MIN:-${IDX_HOT_HEAP:-1536m}} -Xmx${IDX_HOT_HEAP:-1536m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -455,21 +540,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-hot3:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/hot3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/hot3.indexer.key
       - ./config/wazuh_indexer_ssl_certs/hot3.indexer.pem:/usr/share/wazuh-indexer/config/certs/hot3.indexer.pem
-      - ./config/wazuh_indexer/hot3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/hot3.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   warm1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: warm1.indexer
     container_name: warm1.indexer
     restart: always
+    cpu_shares: ${IDX_WARM_CPU_SHARES:-768}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP:-1g} -Xmx${IDX_WARM_HEAP:-1g}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP_MIN:-${IDX_WARM_HEAP:-1g}} -Xmx${IDX_WARM_HEAP:-1g}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -489,21 +586,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-warm1:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/warm1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/warm1.indexer.key
       - ./config/wazuh_indexer_ssl_certs/warm1.indexer.pem:/usr/share/wazuh-indexer/config/certs/warm1.indexer.pem
-      - ./config/wazuh_indexer/warm1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/warm1.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   warm2.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: warm2.indexer
     container_name: warm2.indexer
     restart: always
+    cpu_shares: ${IDX_WARM_CPU_SHARES:-768}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP:-1g} -Xmx${IDX_WARM_HEAP:-1g}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP_MIN:-${IDX_WARM_HEAP:-1g}} -Xmx${IDX_WARM_HEAP:-1g}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -523,21 +632,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-warm2:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/warm2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/warm2.indexer.key
       - ./config/wazuh_indexer_ssl_certs/warm2.indexer.pem:/usr/share/wazuh-indexer/config/certs/warm2.indexer.pem
-      - ./config/wazuh_indexer/warm2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/warm2.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   warm3.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: warm3.indexer
     container_name: warm3.indexer
     restart: always
+    cpu_shares: ${IDX_WARM_CPU_SHARES:-768}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP:-1g} -Xmx${IDX_WARM_HEAP:-1g}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP_MIN:-${IDX_WARM_HEAP:-1g}} -Xmx${IDX_WARM_HEAP:-1g}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -557,21 +678,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-warm3:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/warm3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/warm3.indexer.key
       - ./config/wazuh_indexer_ssl_certs/warm3.indexer.pem:/usr/share/wazuh-indexer/config/certs/warm3.indexer.pem
-      - ./config/wazuh_indexer/warm3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/warm3.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   cold1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: cold1.indexer
     container_name: cold1.indexer
     restart: always
+    cpu_shares: ${IDX_COLD_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP:-768m} -Xmx${IDX_COLD_HEAP:-768m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP_MIN:-${IDX_COLD_HEAP:-768m}} -Xmx${IDX_COLD_HEAP:-768m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -591,21 +724,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-cold1:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/cold1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold1.indexer.key
       - ./config/wazuh_indexer_ssl_certs/cold1.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold1.indexer.pem
-      - ./config/wazuh_indexer/cold1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/cold1.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   cold2.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: cold2.indexer
     container_name: cold2.indexer
     restart: always
+    cpu_shares: ${IDX_COLD_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP:-768m} -Xmx${IDX_COLD_HEAP:-768m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP_MIN:-${IDX_COLD_HEAP:-768m}} -Xmx${IDX_COLD_HEAP:-768m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -625,21 +770,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-cold2:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/cold2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.key
       - ./config/wazuh_indexer_ssl_certs/cold2.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.pem
-      - ./config/wazuh_indexer/cold2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/cold2.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   cold3.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: cold3.indexer
     container_name: cold3.indexer
     restart: always
+    cpu_shares: ${IDX_COLD_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP:-768m} -Xmx${IDX_COLD_HEAP:-768m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP_MIN:-${IDX_COLD_HEAP:-768m}} -Xmx${IDX_COLD_HEAP:-768m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -659,21 +816,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-cold3:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/cold3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.key
       - ./config/wazuh_indexer_ssl_certs/cold3.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.pem
-      - ./config/wazuh_indexer/cold3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/cold3.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   ingest1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: ingest1.indexer
     container_name: ingest1.indexer
     restart: always
+    cpu_shares: ${IDX_INGEST_CPU_SHARES:-1536}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_INGEST_HEAP:-512m} -Xmx${IDX_INGEST_HEAP:-512m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_INGEST_HEAP_MIN:-${IDX_INGEST_HEAP:-512m}} -Xmx${IDX_INGEST_HEAP:-512m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -693,21 +862,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-ingest1:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/ingest1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/ingest1.indexer.key
       - ./config/wazuh_indexer_ssl_certs/ingest1.indexer.pem:/usr/share/wazuh-indexer/config/certs/ingest1.indexer.pem
-      - ./config/wazuh_indexer/ingest1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/ingest1.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   ingest2.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: ingest2.indexer
     container_name: ingest2.indexer
     restart: always
+    cpu_shares: ${IDX_INGEST_CPU_SHARES:-1536}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_INGEST_HEAP:-512m} -Xmx${IDX_INGEST_HEAP:-512m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_INGEST_HEAP_MIN:-${IDX_INGEST_HEAP:-512m}} -Xmx${IDX_INGEST_HEAP:-512m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -727,21 +908,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-ingest2:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/ingest2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/ingest2.indexer.key
       - ./config/wazuh_indexer_ssl_certs/ingest2.indexer.pem:/usr/share/wazuh-indexer/config/certs/ingest2.indexer.pem
-      - ./config/wazuh_indexer/ingest2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/ingest2.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   coord1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: coord1.indexer
     container_name: coord1.indexer
     restart: always
+    cpu_shares: ${IDX_COORD_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COORD_HEAP:-512m} -Xmx${IDX_COORD_HEAP:-512m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COORD_HEAP_MIN:-${IDX_COORD_HEAP:-512m}} -Xmx${IDX_COORD_HEAP:-512m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -763,21 +956,33 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-coord1:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/coord1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/coord1.indexer.key
       - ./config/wazuh_indexer_ssl_certs/coord1.indexer.pem:/usr/share/wazuh-indexer/config/certs/coord1.indexer.pem
-      - ./config/wazuh_indexer/coord1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/coord1.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
   coord2.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
     hostname: coord2.indexer
     container_name: coord2.indexer
     restart: always
+    cpu_shares: ${IDX_COORD_CPU_SHARES:-512}
     environment:
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COORD_HEAP:-512m} -Xmx${IDX_COORD_HEAP:-512m}"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COORD_HEAP_MIN:-${IDX_COORD_HEAP:-512m}} -Xmx${IDX_COORD_HEAP:-512m}"
       - "bootstrap.memory_lock=true"
     deploy:
       resources:
@@ -797,14 +1002,132 @@ services:
       retries: 10
       start_period: 120s
     volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
       - indexer-data-coord2:/var/lib/wazuh-indexer
       - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
       - ./config/wazuh_indexer_ssl_certs/coord2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/coord2.indexer.key
       - ./config/wazuh_indexer_ssl_certs/coord2.indexer.pem:/usr/share/wazuh-indexer/config/certs/coord2.indexer.pem
-      - ./config/wazuh_indexer/coord2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/coord2.indexer.yml:/opensearch.node.yml:ro
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
+  # Optional dedicated machine-learning node (OpenSearch ml-commons).
+  # Wazuh has no ML component of its own; this node runs the bundled
+  # opensearch-ml plugin's workloads (anomaly detection models etc.)
+  # without stealing resources from the data tiers.
+  ml1.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
+    profiles: [ "ml" ]
+    hostname: ml1.indexer
+    container_name: ml1.indexer
+    restart: always
+    cpu_shares: ${IDX_ML_CPU_SHARES:-1024}
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_ML_HEAP_MIN:-${IDX_ML_HEAP:-1g}} -Xmx${IDX_ML_HEAP:-1g}"
+      - "bootstrap.memory_lock=true"
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_ML_MEM_LIMIT:-2g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
+      - indexer-data-ml1:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/ml1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/ml1.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/ml1.indexer.pem:/usr/share/wazuh-indexer/config/certs/ml1.indexer.pem
+      - ./config/wazuh_indexer/ml1.indexer.yml:/opensearch.node.yml:ro
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    depends_on:
+      master1.indexer:
+        condition: service_started
+    networks:
+      - siem
+
+  # ---------------------------------------------------------------------------
+  # Optional archive module (enable with: ./wazuh-deploy.sh archive enable)
+  # RustFS = S3-compatible object storage for long retention:
+  #   wazuh-index-snapshots  <- OpenSearch snapshots (restore on demand)
+  #   wazuh-raw-archives     <- raw events (archives.json)
+  # ---------------------------------------------------------------------------
+  rustfs:
+    image: rustfs/rustfs:${RUSTFS_VERSION:-1.0.0-rc.1}
+    profiles: [ "archive" ]
+    hostname: rustfs
+    container_name: rustfs
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: ${RUSTFS_MEM_LIMIT:-1g}
+    environment:
+      - RUSTFS_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - RUSTFS_SECRET_KEY=${S3_SECRET_KEY:-}
+      - RUSTFS_TLS_PATH=/tls
+    volumes:
+      - rustfs-data:/data
+      - ./config/wazuh_indexer_ssl_certs/rustfs-tls:/tls:ro
+    networks:
+      - siem
+
+  # Ships the Wazuh master's raw event archives (archives.json rotations, only
+  # written when <logall_json> is enabled) into wazuh-raw-archives hourly.
+  archiver:
+    image: rclone/rclone:${RCLONE_VERSION:-1.68}
+    profiles: [ "archive" ]
+    hostname: archiver
+    container_name: siem-archiver
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    environment:
+      - RCLONE_CONFIG_ARCHIVE_TYPE=s3
+      - RCLONE_CONFIG_ARCHIVE_PROVIDER=Other
+      - RCLONE_CONFIG_ARCHIVE_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-https://rustfs:9000}
+      - RCLONE_CONFIG_ARCHIVE_ACCESS_KEY_ID=${S3_ACCESS_KEY:-}
+      - RCLONE_CONFIG_ARCHIVE_SECRET_ACCESS_KEY=${S3_SECRET_KEY:-}
+      - RCLONE_CONFIG_ARCHIVE_FORCE_PATH_STYLE=true
+      - RCLONE_CA_CERT=/certs/root-ca.pem
+    entrypoint: [ "/bin/sh", "-c" ]
+    command:
+      - |
+        while true; do
+          rclone sync /logs/archives archive:wazuh-raw-archives/wazuh.master --log-level NOTICE
+          sleep 3600
+        done
+    volumes:
+      - master-wazuh-logs:/logs:ro
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/certs/root-ca.pem:ro
+    depends_on:
+      - rustfs
+    networks:
+      - siem
+
   wazuh.dashboard:
     image: wazuh/wazuh-dashboard:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.dashboard
@@ -871,8 +1194,16 @@ networks:
   siem:
     name: siem
     driver: bridge
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24
+          # dynamic allocations stay in the upper half; static manager IPs
+          # (.11-.15) live below it and can never collide
+          ip_range: 10.77.0.128/25
 
 volumes:
+  indexer-data-ml1:
+  rustfs-data:
   master-wazuh-api-configuration:
   master-wazuh-etc:
   master-wazuh-logs:

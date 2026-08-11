@@ -13,3 +13,5 @@ config/nodes.yml
 airgap-cache/
 wazuh-airgap-*/
 csr-bundle-*.tar.gz
+config/archive/*.zip
+config/dns/

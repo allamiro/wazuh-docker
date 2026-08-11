@@ -58,6 +58,7 @@ plugins.security.nodes_dn:
   - "CN=ingest2.indexer"
   - "CN=coord1.indexer"
   - "CN=coord2.indexer"
+  - "CN=ml1.indexer"
 plugins.security.restapi.roles_enabled:
   - "all_access"
   - "security_rest_api_access"

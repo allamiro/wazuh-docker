@@ -99,6 +99,15 @@ Keep it on a protected administrative workstation; copy it to an indexer
 node only for the duration of securityadmin.sh runs.
 EOF
       ;;
+    s3-server) cat <<EOF
+HTTPS server identity for the RustFS S3 object store (archive module).
+Target layout on the RustFS server (RUSTFS_TLS_PATH):
+  <tls-dir>/rustfs_cert.pem  <- $name.pem
+  <tls-dir>/rustfs_key.pem   <- $name-key.pem
+The indexers authenticate with S3 access/secret keys and verify this
+certificate against root-ca.pem - no client certificates are involved.
+EOF
+      ;;
   esac
 }
 
@@ -141,6 +150,7 @@ EOF
     dashboard) dest=/etc/wazuh-dashboard/certs; owner=wazuh-dashboard:wazuh-dashboard ;;
     wazuh-api) dest=/var/ossec/api/configuration/ssl ;;
     authd)     dest=/var/ossec/etc ;;
+    s3-server) dest=/etc/rustfs/tls ;;
     *)         dest="" ;;
   esac
   if [[ -n "$dest" ]]; then
@@ -159,6 +169,10 @@ EOF
         authd)
           echo "install -m 400 $name.pem $dest/sslmanager.cert"
           echo "install -m 400 $name-key.pem $dest/sslmanager.key" ;;
+        s3-server)
+          echo "install -m 400 $name.pem $dest/rustfs_cert.pem"
+          echo "install -m 400 $name-key.pem $dest/rustfs_key.pem"
+          echo "# point RustFS at it: RUSTFS_TLS_PATH=$dest" ;;
         *)
           echo "install -m 400 $name.pem $name-key.pem root-ca.pem $dest/"
           [[ -n "$owner" ]] && echo "chown -R $owner $dest"
@@ -192,9 +206,14 @@ EOF
 cmd_docker() {
   preflight
   echo "[*] Cross-checking docker-compose.yml certificate mounts..."
-  local missing=0 f
+  local missing=0 f archive_on=no
+  grep -qs '^COMPOSE_PROFILES=.*archive' .env && archive_on=yes
   while read -r f; do
-    if [[ ! -f "$f" ]]; then
+    # rustfs-tls/ belongs to the optional archive profile only
+    if [[ "$f" == *rustfs-tls* && "$archive_on" == "no" ]]; then
+      continue
+    fi
+    if [[ ! -f "$f" && ! -d "$f" ]]; then
       echo "[FAIL] mounted in compose but missing on disk: $f"
       missing=$((missing+1))
     fi

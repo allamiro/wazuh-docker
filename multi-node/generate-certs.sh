@@ -126,7 +126,7 @@ PRIVATE KEYS MUST NOT LEAVE THIS HOST.
 The CA needs ONLY the .csr files.
 
 After receiving the signed certificates (and root-ca.pem), run:
-  ./generate-certs.sh import
+  ./generate-certs.sh import      (or: ./wazuh-deploy.sh pki import)
 EOF
 }
 
@@ -218,7 +218,7 @@ Signing complete. The CA private key in $CA_DIR is NOT needed at runtime -
 move $CA_DIR to offline protected storage now.
 
 Next:
-  ./generate-certs.sh verify
+  ./generate-certs.sh verify      (or: ./wazuh-deploy.sh pki verify)
 EOF
 }
 

@@ -46,6 +46,13 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 | Docker specifics | [docs/DOCKER.md](docs/DOCKER.md) |
 | VM / bare-metal specifics | [docs/BAREMETAL.md](docs/BAREMETAL.md) |
 | PKI deep reference | [docs/PKI.md](docs/PKI.md) |
+| Long-term retention (RustFS S3 archive) | [docs/ARCHIVE.md](docs/ARCHIVE.md) |
+
+Optional modules: `./wazuh-deploy.sh archive enable` adds **RustFS**
+S3 storage (index snapshots + raw-event archives, 1–7 year retention);
+`COMPOSE_PROFILES=ml` adds a dedicated **OpenSearch ML node**. External
+**Windows AD DNS / ADCS** integration is built in
+(`./wazuh-deploy.sh dns records`, `pki export-csr`).
 
 The single-purpose tools (`generate-certs.sh`, `generate-credentials.sh`,
 `deploy-certs.sh`, `docker compose`) all remain directly usable —

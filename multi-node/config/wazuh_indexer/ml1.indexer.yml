@@ -1,11 +1,10 @@
-# cold1.indexer - cold-tier data node (node.attr.temp=cold)
+# ml1.indexer - dedicated machine-learning node (OpenSearch ml-commons)
 network.host: "0.0.0.0"
 # Advertise the DNS name (matches the cert SANs) instead of the container
 # IP, so transport hostname verification can stay enforced.
-network.publish_host: cold1.indexer
-node.name: cold1.indexer
-node.roles: [data]
-node.attr.temp: cold
+network.publish_host: ml1.indexer
+node.name: ml1.indexer
+node.roles: [ml]
 cluster.name: "wazuh-cluster"
 cluster.initial_cluster_manager_nodes:
   - master1.indexer
@@ -17,11 +16,11 @@ discovery.seed_hosts:
   - master3.indexer
 path.data: /var/lib/wazuh-indexer
 path.logs: /var/log/wazuh-indexer
-plugins.security.ssl.http.pemcert_filepath: ${OPENSEARCH_PATH_CONF}/certs/cold1.indexer.pem
-plugins.security.ssl.http.pemkey_filepath: ${OPENSEARCH_PATH_CONF}/certs/cold1.indexer.key
+plugins.security.ssl.http.pemcert_filepath: ${OPENSEARCH_PATH_CONF}/certs/ml1.indexer.pem
+plugins.security.ssl.http.pemkey_filepath: ${OPENSEARCH_PATH_CONF}/certs/ml1.indexer.key
 plugins.security.ssl.http.pemtrustedcas_filepath: ${OPENSEARCH_PATH_CONF}/certs/root-ca.pem
-plugins.security.ssl.transport.pemcert_filepath: ${OPENSEARCH_PATH_CONF}/certs/cold1.indexer.pem
-plugins.security.ssl.transport.pemkey_filepath: ${OPENSEARCH_PATH_CONF}/certs/cold1.indexer.key
+plugins.security.ssl.transport.pemcert_filepath: ${OPENSEARCH_PATH_CONF}/certs/ml1.indexer.pem
+plugins.security.ssl.transport.pemkey_filepath: ${OPENSEARCH_PATH_CONF}/certs/ml1.indexer.key
 plugins.security.ssl.transport.pemtrustedcas_filepath: ${OPENSEARCH_PATH_CONF}/certs/root-ca.pem
 plugins.security.ssl.http.enabled: true
 # Certificates carry proper DNS SANs, so transport-layer hostname

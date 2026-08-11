@@ -220,7 +220,37 @@ OS page cache (which OpenSearch relies on heavily).
 | nginx | n/a | 256 MB | 1 | 0.25 GB |
 | **Total** | **≈ 13.25 GB heap** | | | **≈ 35.75 GB caps** |
 
-Every value is overridable in `.env` (`IDX_HOT_HEAP`, `MANAGER_MEM_LIMIT`, …).
+### Performance tuning (all in `.env`)
+
+Every tier is tunable without touching the compose file — `generate-credentials.sh`
+seeds `.env` with the defaults; edit and `docker compose up -d`:
+
+| Variable family | Meaning | Notes |
+|---|---|---|
+| `IDX_<TIER>_HEAP` | JVM max heap (`-Xmx`) per indexer tier (`MASTER/HOT/WARM/COLD/INGEST/COORD/ML`) | keep ≤ 50 % of the tier's memory limit |
+| `IDX_<TIER>_HEAP_MIN` | JVM min heap (`-Xms`) | defaults to the max — recommended; set lower only if you must overcommit |
+| `IDX_<TIER>_MEM_LIMIT` | container memory ceiling | |
+| `IDX_<TIER>_CPU_SHARES` | relative CPU priority under contention | defaults prioritise the busy tiers: hot 2048, ingest 1536, ml 1024, warm 768, others 512 |
+| `MANAGER_MEM_LIMIT`, `DASHBOARD_MEM_LIMIT`, `RUSTFS_MEM_LIMIT` | non-JVM services | |
+
+`cpu_shares` only bites when CPUs are saturated — idle tiers still use spare
+cycles. The hot and ingest tiers do most of the work (all new writes + queries
+over recent data), which is why they get the highest weight.
+
+### Optional dedicated ML node
+
+Wazuh itself ships no machine-learning component, but the bundled indexer
+(OpenSearch 2.19) includes the `opensearch-ml` plugin, which supports
+dedicated ML nodes. An optional `ml1.indexer` container (`node.roles: [ml]`,
+its own certificate, trusted in `nodes_dn`) runs ML workloads — e.g. anomaly
+detectors over `wazuh-alerts-*` — without stealing resources from the data
+tiers:
+
+```bash
+COMPOSE_PROFILES=ml docker compose up -d     # or add "ml" to COMPOSE_PROFILES in .env
+```
+
+Tune with `IDX_ML_HEAP` / `IDX_ML_MEM_LIMIT` / `IDX_ML_CPU_SHARES`.
 
 ---
 
@@ -253,8 +283,26 @@ Add-Content C:\Windows\System32\drivers\etc\hosts `
   "10.0.0.50  siem.local.domain dashboard.siem.local.domain"
 ```
 
-**Active Directory DNS (recommended for a fleet)** — on a domain controller,
-create the zone once and one A record for the host:
+**External Windows AD DNS (recommended — and assumed for domain-joined
+air-gapped estates)**: the DNS zone and the CA live on Windows servers
+*outside* the Wazuh VM. Everything is parameterized in
+`config/deployment.yml` (`dns.mode`, `dns.server`, `dns.host_ip`,
+`pki.adcs_template`) — update them any time and regenerate:
+
+```bash
+./wazuh-deploy.sh dns records
+# -> config/dns/add-dns-records.ps1   run on the Windows DNS server: creates the
+#                                     zone if needed and adds/updates EVERY record
+#                                     (idempotent - safe to re-run after IP changes)
+# -> config/dns/hosts.snippet         hosts-file fallback for clients without DNS
+```
+
+One host = one IP, many hostnames: in Docker mode every record
+(`siem.local.domain`, `dashboard.`, `manager.`, `indexer.`, `s3.`, per-node
+names) points at `dns.host_ip`; in bare-metal mode each node record uses its
+IP from `config/nodes.yml`.
+
+Or create the core records manually on a domain controller:
 
 ```powershell
 Add-DnsServerPrimaryZone -Name "siem.local.domain" -ReplicationScope "Forest"
@@ -281,6 +329,27 @@ or, without a DNS server, the same list in **every** node's `/etc/hosts`.
 Generate the CSRs with the matching suffix: `SIEM_DOMAIN=siem.internal
 ./generate-certs.sh csr` — the SANs then contain the real FQDNs
 (`master1.siem.internal`, …) that TLS peers actually connect to.
+
+### Transitioning commercial → air-gapped (external Windows DNS + ADCS)
+
+The clean cutover order when a connected pilot moves into the enclave with
+its own AD DNS + ADCS PKI:
+
+1. **Bundle on the connected side** — `fetch` + `airgap bundle`; transfer.
+2. **Import on the enclave host** — `airgap import`; re-run `configure` with
+   the enclave's values (`--dns ad --dns-server <DC> --host-ip <VM IP>
+   --ca external --adcs-template <template>` — all stored in
+   `deployment.yml` for later edits).
+3. **DNS first** — `dns records`, run `add-dns-records.ps1` on the Windows
+   DNS server; confirm the domain-joined VM resolves `siem.local.domain`.
+4. **Re-issue certificates from ADCS** — the existing private keys and CSRs
+   are reusable: `pki export-csr` (includes a ready `submit-csrs.ps1`
+   certreq script), sign on the CA side, then
+   `pki import <dir>` with the ADCS-issued certs + the enterprise chain as
+   `root-ca.pem`. The verify gate confirms SANs/EKUs survived the template.
+5. **Deploy + verify** as usual. Agents now trust the enterprise root
+   already present in the domain — no extra CA distribution needed on
+   domain-joined Windows endpoints.
 
 ---
 
@@ -461,9 +530,18 @@ this channel uses the Wazuh agent protocol, not X.509.
 
 ---
 
-## 10. Hot / warm / cold lifecycle (ISM)
+## 10. Hot / warm / cold lifecycle (ISM) — and the archive
 
-Apply the shipped policy once after first boot:
+With the **archive module** enabled (recommended — see
+[docs/ARCHIVE.md](docs/ARCHIVE.md)), `./wazuh-deploy.sh archive init` applies
+the archive variant of the policy automatically: hot 7 d → warm 30 d →
+cold 90 d → **snapshot to RustFS** → delete locally. Long-term retention
+(1/3/5/7 years) then lives in the `wazuh-index-snapshots` bucket, and raw
+events ship continuously to `wazuh-raw-archives` via the `siem-archiver`
+sidecar.
+
+Without the archive module, apply the local-only policy once after first
+boot:
 
 ```bash
 source .env
@@ -549,3 +627,114 @@ under Wazuh monitoring.
 | Filebeat: certificate valid for X, not ingest1.indexer | SAN mismatch — run `./generate-certs.sh verify` and re-issue |
 | agents can't enroll | wrong enrollment password, DNS for `siem.local.domain` missing (section 3), or 1515 blocked |
 | cluster yellow after a tier restart | normal while replicas re-sync |
+
+---
+
+## 15. Deploying agents (Linux & Windows)
+
+Agents need exactly three things: the name **`siem.local.domain`** (one IP —
+resolved via the AD DNS records from section 3), the **enrollment password**
+(`multi-node/config/wazuh_cluster/authd.pass`), and the agent package
+(from your repo mirror or the air-gap bundle's `packages/` directory).
+Enrollment goes to `siem.local.domain:1515`, events to `:1514` — nginx
+routes both.
+
+Dashboard access for analysts: `https://siem.local.domain` — username
+`admin`, password = `INDEXER_PASSWORD` in `multi-node/.env` (printed by
+`generate-credentials.sh`).
+
+### Linux agent
+
+```bash
+# Debian/Ubuntu (RPM: same variables with rpm -i / yum localinstall)
+sudo WAZUH_MANAGER='siem.local.domain' \
+     WAZUH_REGISTRATION_SERVER='siem.local.domain' \
+     WAZUH_REGISTRATION_PASSWORD='<contents of authd.pass>' \
+     WAZUH_AGENT_GROUP='default' \
+  dpkg -i wazuh-agent_4.14.7-1_amd64.deb
+sudo systemctl daemon-reload && sudo systemctl enable --now wazuh-agent
+```
+
+Optional but recommended — make the agent **verify the manager's CA-signed
+enrollment certificate**: copy `root-ca.pem` to
+`/var/ossec/etc/rootca.pem` on the agent and add inside
+`<client><enrollment>` in `/var/ossec/etc/ossec.conf`:
+
+```xml
+<server_ca_path>/var/ossec/etc/rootca.pem</server_ca_path>
+```
+
+Collecting extra log files — append `<localfile>` blocks to the agent's
+`ossec.conf` (or push them centrally via agent groups):
+
+```xml
+<ossec_config>
+  <!-- any text log -->
+  <localfile>
+    <log_format>syslog</log_format>
+    <location>/var/log/myapp/app.log</location>
+  </localfile>
+  <!-- journald unit -->
+  <localfile>
+    <log_format>journald</log_format>
+    <location>journald</location>
+    <filter field="_SYSTEMD_UNIT">sshd.service</filter>
+  </localfile>
+  <!-- extra file-integrity monitoring -->
+  <syscheck>
+    <directories check_all="yes" realtime="yes">/etc/myapp</directories>
+  </syscheck>
+</ossec_config>
+```
+
+### Windows agent
+
+PowerShell as Administrator (package: `wazuh-agent-4.14.7-1.msi`):
+
+```powershell
+msiexec.exe /i wazuh-agent-4.14.7-1.msi /q `
+  WAZUH_MANAGER="siem.local.domain" `
+  WAZUH_REGISTRATION_SERVER="siem.local.domain" `
+  WAZUH_REGISTRATION_PASSWORD="<contents of authd.pass>" `
+  WAZUH_AGENT_GROUP="windows"
+NET START WazuhSvc
+```
+
+Windows event collection — the agent already ships Application/Security/
+System by default; add more channels in
+`C:\Program Files (x86)\ossec-agent\ossec.conf`:
+
+```xml
+<ossec_config>
+  <!-- Sysmon (install Sysmon with a config like SwiftOnSecurity first) -->
+  <localfile>
+    <location>Microsoft-Windows-Sysmon/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+  <!-- PowerShell script-block logging -->
+  <localfile>
+    <location>Microsoft-Windows-PowerShell/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+  <!-- Windows Defender -->
+  <localfile>
+    <location>Microsoft-Windows-Windows Defender/Operational</location>
+    <log_format>eventchannel</log_format>
+  </localfile>
+  <!-- a flat log file, e.g. IIS -->
+  <localfile>
+    <location>C:\inetpub\logs\LogFiles\W3SVC1\u_ex*.log</location>
+    <log_format>iis</log_format>
+  </localfile>
+</ossec_config>
+```
+
+Restart the agent after config changes (`systemctl restart wazuh-agent` /
+`Restart-Service WazuhSvc`). Manage fleets centrally with **agent groups**
+(shared `agent.conf` pushed from the master) instead of editing every
+endpoint: `docker exec wazuh.master /var/ossec/bin/agent_groups -a -g windows -q`,
+then edit `/var/ossec/etc/shared/windows/agent.conf` on the master.
+
+Verify enrollment: the agent appears in the dashboard under Agents within a
+minute, and `docker exec wazuh.master /var/ossec/bin/agent_control -l` lists
+it as Active.

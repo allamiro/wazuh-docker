@@ -60,7 +60,10 @@ require_config() {
   export SIEM_DOMAIN WAZUH_VERSION
 }
 
-IMAGES() {
+# OpenSearch version bundled in wazuh-indexer (drives the repository-s3 zip)
+OPENSEARCH_VERSION="${OPENSEARCH_VERSION:-2.19.5}"
+
+CORE_IMAGES() {
   cat <<EOF
 wazuh/wazuh-manager:$WAZUH_VERSION
 wazuh/wazuh-indexer:$WAZUH_VERSION
@@ -68,6 +71,20 @@ wazuh/wazuh-dashboard:$WAZUH_VERSION
 nginx:1.29-alpine
 smallstep/step-ca:latest
 EOF
+}
+
+ARCHIVE_IMAGES() {
+  cat <<EOF
+rustfs/rustfs:${RUSTFS_VERSION:-1.0.0-rc.1}
+rclone/rclone:${RCLONE_VERSION:-1.68}
+EOF
+}
+
+archive_enabled() { grep -qs '^COMPOSE_PROFILES=.*archive' .env; }
+
+IMAGES() {
+  CORE_IMAGES
+  archive_enabled && ARCHIVE_IMAGES || true
 }
 
 inventory() {
@@ -84,6 +101,7 @@ ask() { # ask <prompt> <default>
 cmd_configure() {
   local platform="" environment="" version="4.14.7" domain="siem.local.domain"
   local ca="" lb="yes" interactive=yes
+  local host_ip="" dns_mode="" dns_server="" adcs_template="WazuhNode"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -94,6 +112,10 @@ cmd_configure() {
       --domain)      domain="$2"; shift ;;
       --ca)          ca="$2"; shift ;;
       --lb)          lb="$2"; shift ;;
+      --host-ip)     host_ip="$2"; shift ;;
+      --dns)         dns_mode="$2"; shift ;;
+      --dns-server)  dns_server="$2"; shift ;;
+      --adcs-template) adcs_template="$2"; shift ;;
       *) failm "unknown option: $1"; exit 1 ;;
     esac
     shift
@@ -131,10 +153,23 @@ cmd_configure() {
       *)          ca=step ;;
     esac
     lb=$(ask "Use nginx load balancer for agent traffic? (yes/no)" "$lb")
+    say ""
+    say "DNS (how clients/agents resolve $domain):"
+    say "  1) Windows AD DNS zone (domain-joined environment)"
+    say "  2) hosts files on every client"
+    case "$(ask "Select" "${dns_mode:-1}")" in
+      2|hosts) dns_mode=hosts ;;
+      *)       dns_mode=ad ;;
+    esac
+    host_ip=$(ask "IP of this Wazuh host (all service hostnames resolve to it)" "${host_ip:-10.0.0.50}")
+    [[ "$dns_mode" == "ad" ]] && dns_server=$(ask "AD DNS server (hostname/IP, for the ops runbook)" "${dns_server:-}")
+    [[ "$ca" == "external" ]] && adcs_template=$(ask "ADCS certificate template name" "$adcs_template")
   else
     platform="${platform:-docker}"
     environment="${environment:-airgap}"
     ca="${ca:-step}"
+    dns_mode="${dns_mode:-ad}"
+    host_ip="${host_ip:-10.0.0.50}"
   fi
 
   case "$platform"    in docker|baremetal) ;; *) failm "platform must be docker|baremetal"; exit 1 ;; esac
@@ -176,9 +211,17 @@ load_balancer:
   enabled: $lb
   type: nginx
 
+# External infrastructure this deployment depends on (updatable any time;
+# re-run './wazuh-deploy.sh dns records' after changing).
+dns:
+  mode: $dns_mode          # ad = Windows AD DNS zone | hosts = client hosts files
+  server: ${dns_server:-}
+  host_ip: $host_ip        # single IP every service hostname resolves to (docker)
+
 pki:
   mode: $pki_mode
-  ca: $ca
+  ca: $ca                  # step | openssl | external (e.g. Windows ADCS)
+  adcs_template: $adcs_template
 EOF
 
   # Node inventory derived from the canonical certificate inventory - one
@@ -203,6 +246,7 @@ EOF
   ok "wrote $NODES ($(grep -c "^  - name:" "$NODES") nodes)"
   say ""
   say "Next steps for $environment + $platform:"
+  say "  ./generate-credentials.sh          # passwords, hashes, cluster key (once)"
   if [[ "$environment" == "connected" ]]; then
     say "  ./wazuh-deploy.sh fetch"
     if [[ "$pki_mode" == "automatic" ]]; then
@@ -292,6 +336,14 @@ cmd_validate() {
     fi
   fi
 
+  # archive module (optional)
+  if archive_enabled; then
+    if ls config/archive/repository-s3-*.zip >/dev/null 2>&1; then ok "archive: repository-s3 plugin zip cached"
+    else failm "archive enabled but repository-s3 zip missing (fetch / airgap import)"; fails=$((fails+1)); fi
+    if [[ -f config/wazuh_indexer_ssl_certs/rustfs-tls/rustfs_cert.pem ]]; then ok "archive: RustFS TLS directory prepared"
+    else failm "archive enabled but rustfs-tls/ not prepared - re-run: archive enable (after pki sign)"; fails=$((fails+1)); fi
+  fi
+
   # hostname resolution
   if getent hosts "$SIEM_DOMAIN" >/dev/null 2>&1 || dscacheutil -q host -a name "$SIEM_DOMAIN" 2>/dev/null | grep -q ip_address; then
     ok "hostname resolution: $SIEM_DOMAIN"
@@ -340,13 +392,20 @@ cmd_fetch() {
     failm "fetch is for connected environments - use 'airgap import' here"; exit 1; }
 
   if [[ "$PLATFORM" == "docker" ]]; then
-    say "[*] Pulling pinned images..."
+    say "[*] Pulling pinned images (core + archive module)..."
     local img
     while read -r img; do
       say "    $img"
       docker pull -q "$img" >/dev/null
-    done < <(IMAGES)
-    ok "images ready ($(IMAGES | wc -l | tr -d ' ') pulled, version pinned $WAZUH_VERSION)"
+    done < <(CORE_IMAGES; ARCHIVE_IMAGES)
+    ok "images ready (version pinned $WAZUH_VERSION)"
+    local pzip="config/archive/repository-s3-$OPENSEARCH_VERSION.zip"
+    if [[ ! -f "$pzip" ]]; then
+      say "[*] Downloading repository-s3 plugin (archive module, OpenSearch $OPENSEARCH_VERSION)..."
+      curl -fSL --retry 3 -o "$pzip" \
+        "https://artifacts.opensearch.org/releases/plugins/repository-s3/$OPENSEARCH_VERSION/repository-s3-$OPENSEARCH_VERSION.zip"
+    fi
+    ok "repository-s3 plugin cached ($pzip)"
   else
     say "[*] Downloading native packages (pinned $WAZUH_VERSION) into $CACHE/packages ..."
     mkdir -p "$CACHE/packages/deb" "$CACHE/packages/rpm"
@@ -386,15 +445,23 @@ cmd_airgap_bundle() {
   say "[*] Building air-gap bundle in $out/ ..."
   mkdir -p "$out/images" "$out/checksums" "$out/repository" "$out/scripts"
 
-  # 1. docker images
+  # 1. docker images - core AND archive module, so the target can enable the
+  #    archive later without internet access
   local img missing=0
   while read -r img; do
     docker image inspect "$img" >/dev/null 2>&1 || { failm "image not present locally: $img (run fetch first)"; missing=1; }
-  done < <(IMAGES)
+  done < <(CORE_IMAGES; ARCHIVE_IMAGES)
   (( missing == 0 )) || exit 1
   say "    saving images -> images/wazuh-images.tar (several GB, takes a few minutes)"
   # shellcheck disable=SC2046
-  docker save -o "$out/images/wazuh-images.tar" $(IMAGES | tr '\n' ' ')
+  docker save -o "$out/images/wazuh-images.tar" $( (CORE_IMAGES; ARCHIVE_IMAGES) | tr '\n' ' ')
+
+  # 1b. offline plugin zips (repository-s3 for the archive module)
+  if ls config/archive/*.zip >/dev/null 2>&1; then
+    mkdir -p "$out/plugins"
+    cp config/archive/*.zip "$out/plugins/"
+    say "    included OpenSearch plugin zips"
+  fi
 
   # 2. native packages if cached (baremetal targets)
   if [[ -d "$CACHE/packages" ]]; then
@@ -461,6 +528,10 @@ cmd_airgap_import() {
     cp -R "$dir/packages" "$CACHE/"
     ok "native packages copied to $CACHE/packages"
   fi
+  if ls "$dir"/plugins/*.zip >/dev/null 2>&1; then
+    cp "$dir"/plugins/*.zip config/archive/
+    ok "OpenSearch plugin zips copied to config/archive/"
+  fi
   ok "import complete"
   say "    next: ./wazuh-deploy.sh pki csr   (then sign/import + verify + deploy)"
 }
@@ -486,9 +557,23 @@ cmd_pki() {
                 ./generate-certs.sh import ;;
     verify)     ./generate-certs.sh verify ;;
     export-csr) local tarball="csr-bundle-$(date -u +%Y%m%d).tar.gz"
+                local tmpl
+                tmpl=$(cfg pki adcs_template WazuhNode)
+                # certreq submission script for the Windows ADCS admin
+                {
+                  echo "# Submits every Wazuh CSR to the ADCS CA using template '$tmpl'."
+                  echo "# Run on a domain-joined admin workstation, next to the .csr files."
+                  echo "# The template must preserve CSR SANs and issue Server+Client Auth EKUs."
+                  echo "Get-ChildItem -Filter *.csr | ForEach-Object {"
+                  echo "    \$out = \$_.BaseName + '.pem'"
+                  echo "    certreq -submit -attrib \"CertificateTemplate:$tmpl\" \$_.Name \$out"
+                  echo "    Write-Host \"[OK] \$out\""
+                  echo "}"
+                } > config/wazuh_indexer_ssl_certs/csr/submit-csrs.ps1
                 tar czf "$tarball" -C config/wazuh_indexer_ssl_certs csr
-                ok "CSRs exported: $tarball (contains ONLY .csr/.cnf - no private keys)"
-                say "    Sign with your CA (see docs/PKI.md), return the certs, then: pki import <dir>" ;;
+                ok "CSRs exported: $tarball (contains ONLY .csr/.cnf + submit-csrs.ps1 - no private keys)"
+                say "    ADCS: run submit-csrs.ps1 on the CA side (template: $tmpl), return the .pem files"
+                say "    plus the CA chain as root-ca.pem, then: pki import <dir>" ;;
     *) failm "usage: wazuh-deploy.sh pki {csr|sign [--ca step|openssl]|import [dir]|verify|export-csr}"; exit 1 ;;
   esac
 }
@@ -501,6 +586,204 @@ cmd_certificates() {
     exit 1
   fi
   CA_MODE="$PKI_CA" ./generate-certs.sh
+}
+
+# ==================================================================== dns ====
+# Generates ready-to-run records for the EXTERNAL Windows AD DNS (or client
+# hosts files) from the node inventory + dns.host_ip. Re-run any time after
+# changing dns.* in deployment.yml.
+cmd_dns() {
+  require_config
+  local sub="${1:-records}"
+  [[ "$sub" == "records" ]] || { failm "usage: wazuh-deploy.sh dns records"; exit 1; }
+  local host_ip zone
+  host_ip=$(cfg dns host_ip 10.0.0.50)
+  zone="$SIEM_DOMAIN"
+  mkdir -p config/dns
+
+  # ---- Windows AD DNS (run on a DC / DNS admin workstation) ----
+  {
+    echo "# Adds/updates every DNS record for the Wazuh deployment in AD DNS."
+    echo "# Zone: $zone   Deployment host IP: $host_ip"
+    echo "# Generated from config/nodes.yml by 'wazuh-deploy.sh dns records'."
+    echo "# Idempotent: existing records are updated to the current IP."
+    echo ""
+    echo "\$zone = \"$zone\""
+    echo "if (-not (Get-DnsServerZone -Name \$zone -ErrorAction SilentlyContinue)) {"
+    echo "    Add-DnsServerPrimaryZone -Name \$zone -ReplicationScope \"Forest\""
+    echo "}"
+    echo ""
+    echo "\$records = @("
+    # apex + public aliases all point at the deployment host
+    echo "    @{ Name = \"@\";         IP = \"$host_ip\" },"
+    echo "    @{ Name = \"dashboard\"; IP = \"$host_ip\" },"
+    echo "    @{ Name = \"manager\";   IP = \"$host_ip\" },"
+    echo "    @{ Name = \"indexer\";   IP = \"$host_ip\" },"
+    echo "    @{ Name = \"s3\";        IP = \"$host_ip\" },"
+    echo "    @{ Name = \"archive\";   IP = \"$host_ip\" },"
+    # per-node records (docker: all = host_ip; baremetal: per-node IPs)
+    awk '/- name:/{n=$3}/hostname:/{h=$2}/ip:/{print n, h, $2}' "$NODES" | \
+    while read -r name fqdn ip; do
+      [[ "$ip" == "docker-internal" ]] && ip="$host_ip"
+      [[ "$ip" == "REPLACE_ME" ]] && ip="CHANGE_ME"
+      local short="${fqdn%%.$zone}"
+      [[ "$short" == "$fqdn" ]] && continue   # hostname not under the zone
+      echo "    @{ Name = \"$short\"; IP = \"$ip\" },"
+    done | sed '$ s/,$//'
+    echo ")"
+    cat <<'PS1'
+
+foreach ($r in $records) {
+    $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $r.Name -RRType A -ErrorAction SilentlyContinue
+    if ($existing) { Remove-DnsServerResourceRecord -ZoneName $zone -Name $r.Name -RRType A -Force }
+    Add-DnsServerResourceRecordA -ZoneName $zone -Name $r.Name -IPv4Address $r.IP
+    Write-Host "[OK] $($r.Name).$zone -> $($r.IP)"
+}
+PS1
+  } > config/dns/add-dns-records.ps1
+
+  # ---- hosts-file fallback (Linux /etc/hosts, Windows drivers\etc\hosts) ----
+  {
+    echo "# Append to /etc/hosts (Linux) or C:\\Windows\\System32\\drivers\\etc\\hosts (Windows)"
+    echo "# on every client/agent if no DNS zone is available."
+    echo "$host_ip  $zone dashboard.$zone manager.$zone indexer.$zone s3.$zone archive.$zone"
+  } > config/dns/hosts.snippet
+
+  ok "wrote config/dns/add-dns-records.ps1  (run on the Windows DNS server)"
+  ok "wrote config/dns/hosts.snippet        (hosts-file fallback)"
+  [[ -n "$(cfg dns server)" ]] && say "    DNS server on record: $(cfg dns server)"
+}
+
+# ================================================================ archive ====
+# rclone one-shot against the RustFS endpoint, sharing the archiver's config
+s3cmd() {
+  docker run --rm --network siem \
+    -v "$PWD/config/wazuh_indexer_ssl_certs/root-ca.pem:/certs/root-ca.pem:ro" \
+    -e RCLONE_CONFIG_ARCHIVE_TYPE=s3 \
+    -e RCLONE_CONFIG_ARCHIVE_PROVIDER=Other \
+    -e "RCLONE_CONFIG_ARCHIVE_ENDPOINT=$(grep '^ARCHIVE_S3_ENDPOINT=' .env | cut -d= -f2)" \
+    -e "RCLONE_CONFIG_ARCHIVE_ACCESS_KEY_ID=$(grep '^S3_ACCESS_KEY=' .env | cut -d= -f2)" \
+    -e "RCLONE_CONFIG_ARCHIVE_SECRET_ACCESS_KEY=$(grep '^S3_SECRET_KEY=' .env | cut -d= -f2)" \
+    -e RCLONE_CONFIG_ARCHIVE_FORCE_PATH_STYLE=true \
+    -e RCLONE_CA_CERT=/certs/root-ca.pem \
+    "rclone/rclone:${RCLONE_VERSION:-1.68}" "$@"
+}
+
+# CA-verified curl against the indexer REST API, from inside the trust domain
+idx_api() { # idx_api <method> <path> [json-file-or-inline]
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-s --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem
+              -u "admin:$(grep '^INDEXER_PASSWORD=' .env | cut -d= -f2)"
+              -X "$method" "https://master1.indexer:9200$path")
+  [[ -n "$body" ]] && args+=(-H "Content-Type: application/json" -d "$body")
+  docker exec master1.indexer curl "${args[@]}"
+}
+
+cmd_archive() {
+  require_config
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    enable)
+      [[ -f .env ]] || { failm "run ./generate-credentials.sh first"; exit 1; }
+      grep -q '^S3_ACCESS_KEY=' .env || cat >> .env <<EOF
+
+# --- archive module (RustFS S3 long retention) -------------------------------
+S3_ACCESS_KEY=wazuh-archive-$(openssl rand -hex 8)
+S3_SECRET_KEY=$(openssl rand -hex 24)
+ARCHIVE_S3_ENDPOINT=https://rustfs:9000
+COMPOSE_PROFILES=archive
+EOF
+      ok "archive credentials + profile set in .env"
+      # RustFS TLS material (dedicated server identity from the PKI)
+      if [[ -f config/wazuh_indexer_ssl_certs/rustfs.pem ]]; then
+        mkdir -p config/wazuh_indexer_ssl_certs/rustfs-tls
+        cp config/wazuh_indexer_ssl_certs/rustfs.pem     config/wazuh_indexer_ssl_certs/rustfs-tls/rustfs_cert.pem
+        cp config/wazuh_indexer_ssl_certs/rustfs-key.pem config/wazuh_indexer_ssl_certs/rustfs-tls/rustfs_key.pem
+        ok "RustFS TLS directory prepared (rustfs_cert.pem/rustfs_key.pem)"
+      else
+        warn "no rustfs certificate yet - run: pki csr && pki sign (the inventory includes 'rustfs'), then re-run archive enable"
+      fi
+      # raw-event archives on the master (archives.json) feed the raw bucket
+      if [[ -f config/wazuh_cluster/wazuh_manager.conf ]] && \
+         grep -q "<logall_json>no</logall_json>" config/wazuh_cluster/wazuh_manager.conf; then
+        sed -i.bak 's|<logall_json>no</logall_json>|<logall_json>yes</logall_json>|' \
+          config/wazuh_cluster/wazuh_manager.conf && rm -f config/wazuh_cluster/wazuh_manager.conf.bak
+        ok "enabled <logall_json> on the master (raw archives feed)"
+      fi
+      # offline plugin availability
+      if ! ls config/archive/repository-s3-*.zip >/dev/null 2>&1; then
+        if [[ "$ENVIRONMENT" == "connected" ]]; then
+          say "[*] Downloading repository-s3 plugin..."
+          curl -fSL --retry 3 -o "config/archive/repository-s3-$OPENSEARCH_VERSION.zip" \
+            "https://artifacts.opensearch.org/releases/plugins/repository-s3/$OPENSEARCH_VERSION/repository-s3-$OPENSEARCH_VERSION.zip"
+          ok "plugin cached"
+        else
+          warn "repository-s3 zip missing - import an airgap bundle built after this feature"
+        fi
+      fi
+      say ""
+      say "Next:"
+      if [[ ! -f config/wazuh_indexer_ssl_certs/rustfs-tls/rustfs_cert.pem ]]; then
+        say "  ./wazuh-deploy.sh pki csr && ./wazuh-deploy.sh pki sign   # issues the rustfs cert (idempotent)"
+        say "  ./wazuh-deploy.sh archive enable                          # re-run to install the TLS dir"
+      fi
+      say "  docker compose up -d                    # recreates indexers, starts rustfs + archiver"
+      say "  docker compose restart wazuh.master     # picks up the <logall_json> change"
+      say "  ./wazuh-deploy.sh archive init          # buckets, snapshot repository, ISM policy"
+      ;;
+    init)
+      archive_enabled || { failm "archive module not enabled - run: archive enable"; exit 1; }
+      say "[*] Creating buckets..."
+      s3cmd mkdir archive:wazuh-index-snapshots
+      s3cmd mkdir archive:wazuh-raw-archives
+      ok "buckets: wazuh-index-snapshots, wazuh-raw-archives"
+      say "[*] Registering the snapshot repository..."
+      idx_api PUT "/_snapshot/wazuh-index-snapshots" \
+        '{"type":"s3","settings":{"bucket":"wazuh-index-snapshots","base_path":"wazuh"}}' ; echo
+      say "[*] Verifying the repository from every node..."
+      local vres
+      vres=$(idx_api POST "/_snapshot/wazuh-index-snapshots/_verify")
+      if echo "$vres" | grep -q '"nodes"'; then
+        ok "repository verified by $(echo "$vres" | grep -o '"name"' | wc -l | tr -d ' ') node(s)"
+      else
+        failm "repository verification failed: $vres"; exit 1
+      fi
+      say "[*] Applying the archive ISM policy (snapshot before delete)..."
+      local seq prim
+      seq=$(idx_api GET "/_plugins/_ism/policies/wazuh-hot-warm-cold" | grep -o '"_seq_no":[0-9]*' | cut -d: -f2 || true)
+      prim=$(idx_api GET "/_plugins/_ism/policies/wazuh-hot-warm-cold" | grep -o '"_primary_term":[0-9]*' | cut -d: -f2 || true)
+      local qs=""
+      [[ -n "$seq" && -n "$prim" ]] && qs="?if_seq_no=$seq&if_primary_term=$prim"
+      docker exec -i master1.indexer curl -s \
+        --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem \
+        -u "admin:$(grep '^INDEXER_PASSWORD=' .env | cut -d= -f2)" \
+        -X PUT "https://master1.indexer:9200/_plugins/_ism/policies/wazuh-hot-warm-cold$qs" \
+        -H "Content-Type: application/json" \
+        --data-binary @- < config/ism/wazuh-hot-warm-cold-archive-policy.json | grep -q '"policy"' \
+        && ok "ISM policy updated (hot 7d -> warm 30d -> cold 90d -> snapshot -> delete)" \
+        || { failm "ISM policy update failed"; exit 1; }
+      ok "archive module initialized"
+      ;;
+    snapshot)
+      archive_enabled || { failm "archive module not enabled"; exit 1; }
+      local name="manual-$(date -u +%Y%m%d%H%M%S)"
+      say "[*] Snapshotting wazuh-alerts-* to wazuh-index-snapshots/$name ..."
+      idx_api PUT "/_snapshot/wazuh-index-snapshots/$name?wait_for_completion=true" \
+        '{"indices":"wazuh-alerts-*","include_global_state":false}' \
+        | grep -o '"state":"[A-Z]*"\|"failed":[0-9]*' | tr '\n' ' '; echo
+      ;;
+    status)
+      archive_enabled || { warn "archive module not enabled"; exit 0; }
+      docker ps --filter name=rustfs --filter name=siem-archiver --format '{{.Names}}: {{.Status}}'
+      say ""
+      say "Buckets:"
+      s3cmd lsd archive: 2>/dev/null | sed 's/^/  /'
+      say ""
+      say "Snapshots (latest 5):"
+      idx_api GET "/_cat/snapshots/wazuh-index-snapshots?h=id,status,end_time&s=end_time" 2>/dev/null | tail -5 | sed 's/^/  /'
+      ;;
+    *) failm "usage: wazuh-deploy.sh archive {enable|init|snapshot|status}"; exit 1 ;;
+  esac
 }
 
 # ================================================================= deploy ====
@@ -570,10 +853,12 @@ cmd_verify() {
   fi
 
   # --- docker ---
-  local up
-  up=$(docker compose ps --format '{{.Name}}' 2>/dev/null | wc -l | tr -d ' ')
-  if [[ "$up" == "23" ]]; then ok "containers: 23/23 running"
-  else failm "containers: $up/23 running"; fails=$((fails+1)); fi
+  # expected count is profile-aware (archive/ml modules add services)
+  local up expected
+  expected=$(docker compose config --services 2>/dev/null | wc -l | tr -d ' ')
+  up=$(docker compose ps --status running --format '{{.Name}}' 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$up" == "$expected" ]]; then ok "containers: $up/$expected running"
+  else failm "containers: $up/$expected running"; fails=$((fails+1)); fi
 
   # Wazuh server cluster
   local cl
@@ -654,6 +939,8 @@ case "$CMD" in
                   *) failm "usage: wazuh-deploy.sh airgap {bundle|import <dir>}"; exit 1 ;;
                 esac ;;
   pki)          cmd_pki "$@" ;;
+  dns)          cmd_dns "$@" ;;
+  archive)      cmd_archive "$@" ;;
   certificates) cmd_certificates "$@" ;;
   deploy)       cmd_deploy "$@" ;;
   verify)       cmd_verify "$@" ;;
@@ -670,6 +957,7 @@ wazuh-deploy.sh - unified deployment CLI
   airgap import <dir>          air-gapped host: checksum-verify + import
   certificates                 connected one-shot PKI (csr+sign+verify)
   pki csr|export-csr|sign [--ca ...]|import [dir]|verify
+  archive enable|init|snapshot|status   optional RustFS S3 long-retention module
   deploy docker|baremetal
   verify                       runtime verification
   status
