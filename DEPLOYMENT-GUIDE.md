@@ -738,3 +738,33 @@ then edit `/var/ossec/etc/shared/windows/agent.conf` on the master.
 Verify enrollment: the agent appears in the dashboard under Agents within a
 minute, and `docker exec wazuh.master /var/ossec/bin/agent_control -l` lists
 it as Active.
+
+---
+
+## 16. Access reference
+
+Everything an operator needs to reach, in one table. All secrets are
+generated at deploy time and live in **`multi-node/.env`** (chmod 600, never
+in git); the enrollment password is also in
+`multi-node/config/wazuh_cluster/authd.pass`.
+
+| What | Address | Credentials / notes |
+|---|---|---|
+| **Wazuh dashboard** (analysts) | `https://siem.local.domain` (443) | `admin` / `INDEXER_PASSWORD` from `.env` |
+| **Wazuh API** | `https://siem.local.domain:55000` — bound to `127.0.0.1` on the host | `wazuh-wui` / `API_PASSWORD` from `.env` |
+| **Indexer REST** (admin/queries) | `https://127.0.0.1:9200` (coord1, localhost-only) | `admin` / `INDEXER_PASSWORD` |
+| **Agent events** | `siem.local.domain:1514` (TCP) | Wazuh agent protocol — enrolled agents only |
+| **Agent enrollment** | `siem.local.domain:1515` (TLS) | enrollment password from `authd.pass`; CA-signed manager cert |
+| **RustFS S3** (archive module) | `https://rustfs:9000` — internal to the `siem` network only | `S3_ACCESS_KEY` / `S3_SECRET_KEY` from `.env` |
+| **Internal service user** `kibanaserver` | dashboard → indexer | `DASHBOARD_PASSWORD` from `.env` — not for humans |
+| **Root CA** | `multi-node/config/wazuh_indexer_ssl_certs/root-ca.pem` | import into browser/OS trust stores |
+| **CA private key** | `multi-node/config/certs-ca/` | signing only — move to offline storage |
+
+Quick operator commands:
+
+```bash
+./wazuh-deploy.sh status            # container states
+./wazuh-deploy.sh verify            # full runtime health + certificate checks
+./wazuh-deploy.sh archive status    # buckets + latest snapshots
+grep PASSWORD multi-node/.env       # look up any credential
+```

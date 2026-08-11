@@ -866,16 +866,18 @@ cmd_verify() {
   if [[ "$cl" == "4" ]]; then ok "Wazuh master + 4 workers joined"
   else failm "Wazuh cluster: only $cl/4 workers joined"; fails=$((fails+1)); fi
 
-  # indexer cluster - full TLS verification from inside the trust domain
-  local health
+  # indexer cluster - full TLS verification from inside the trust domain.
+  # Expected node count = running *.indexer containers (profile-aware).
+  local health exp_nodes
+  exp_nodes=$(docker ps --format '{{.Names}}' | grep -c '\.indexer$' || true)
   health=$(docker exec master1.indexer curl -s \
     --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem \
     -u "admin:$(grep '^INDEXER_PASSWORD=' .env | cut -d= -f2)" \
     "https://master1.indexer:9200/_cluster/health" 2>/dev/null || true)
-  if echo "$health" | grep -q '"number_of_nodes":16' && echo "$health" | grep -q '"status":"green"'; then
-    ok "indexer cluster: 16 nodes, health green (TLS verified against root CA)"
+  if echo "$health" | grep -q "\"number_of_nodes\":$exp_nodes" && echo "$health" | grep -q '"status":"green"'; then
+    ok "indexer cluster: $exp_nodes nodes, health green (TLS verified against root CA)"
   else
-    failm "indexer cluster unhealthy: $(echo "$health" | head -c 120)"; fails=$((fails+1))
+    failm "indexer cluster unhealthy (expected $exp_nodes nodes): $(echo "$health" | head -c 120)"; fails=$((fails+1))
   fi
 
   # filebeat
