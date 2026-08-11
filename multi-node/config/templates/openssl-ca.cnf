@@ -1,0 +1,50 @@
+# -----------------------------------------------------------------------------
+# Example OpenSSL CA configuration for signing the Wazuh CSRs with a
+# standalone corporate `openssl ca` setup (Phase 2C in DEPLOYMENT-GUIDE.md).
+#
+# Usage on the CA host (one-time setup):
+#   mkdir -p ca/newcerts && touch ca/index.txt && echo 1000 > ca/serial
+#   # place your CA key/cert at ca/root-ca.key / ca/root-ca.pem
+#
+# Signing a Wazuh CSR (repeat per CSR):
+#   openssl ca -config openssl-ca.cnf \
+#     -extensions server_client_ext \
+#     -in  hot1.indexer.csr \
+#     -out hot1.indexer.pem \
+#     -batch -notext
+#
+# copy_extensions = copy carries the subjectAltName over from the CSR.
+# The EKU section grants BOTH serverAuth and clientAuth - indexer nodes and
+# Filebeat authenticate as TLS clients; server-only certificates WILL break
+# the indexer transport layer.
+# -----------------------------------------------------------------------------
+[ca]
+default_ca = wazuh_ca
+
+[wazuh_ca]
+dir              = ./ca
+new_certs_dir    = $dir/newcerts
+database         = $dir/index.txt
+serial           = $dir/serial
+private_key      = $dir/root-ca.key
+certificate      = $dir/root-ca.pem
+default_md       = sha256
+default_days     = 825
+policy           = policy_loose
+# copy SANs (and only SANs we expect) from the CSR
+copy_extensions  = copy
+unique_subject   = no
+
+[policy_loose]
+commonName             = supplied
+countryName            = optional
+organizationName       = optional
+organizationalUnitName = optional
+localityName           = optional
+
+[server_client_ext]
+basicConstraints = CA:FALSE
+keyUsage         = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth, clientAuth
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer

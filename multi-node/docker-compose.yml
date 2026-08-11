@@ -62,9 +62,13 @@ services:
       - ./config/wazuh_indexer_ssl_certs/wazuh.master-key.pem:/etc/ssl/filebeat.key
       - ./config/wazuh_cluster/wazuh_manager.conf:/wazuh-config-mount/etc/ossec.conf
       - ./config/wazuh_cluster/authd.pass:/wazuh-config-mount/etc/authd.pass
-      # CA-signed cert for agent enrollment (authd, port 1515)
-      - ./config/wazuh_indexer_ssl_certs/wazuh.master.pem:/wazuh-config-mount/etc/sslmanager.cert
-      - ./config/wazuh_indexer_ssl_certs/wazuh.master-key.pem:/wazuh-config-mount/etc/sslmanager.key
+      # dedicated CA-signed cert for agent enrollment (authd, port 1515)
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master-enrollment.pem:/wazuh-config-mount/etc/sslmanager.cert
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master-enrollment-key.pem:/wazuh-config-mount/etc/sslmanager.key
+      # dedicated CA-signed cert for the Wazuh API (port 55000) - replaces the
+      # self-signed certificate the API generates on first start
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master-api.pem:/wazuh-config-mount/api/configuration/ssl/server.crt
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master-api-key.pem:/wazuh-config-mount/api/configuration/ssl/server.key
     depends_on:
       ingest1.indexer:
         condition: service_healthy
