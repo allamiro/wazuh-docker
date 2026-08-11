@@ -18,3 +18,7 @@ opensearch_security.session.ttl: 900000
 opensearch_security.session.keepalive: true
 # Cookies only over TLS
 opensearch_security.cookie.secure: true
+# Offline maps (optional "maps" profile): self-hosted tiles instead of the
+# unreachable maps.opensearch.org. Served via the nginx TLS vhost; without
+# the maps profile this is simply unreachable (maps stay blank, as before).
+map.opensearchManifestServiceUrl: "https://siem.local.domain:8080/manifest.json"

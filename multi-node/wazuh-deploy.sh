@@ -46,7 +46,7 @@ cfg() { # cfg <section> <key> [default]
   v=$(awk -v s="$1:" -v k="$2:" '
     $0 ~ "^"s"$" {insec=1; next}
     /^[^ ]/ {insec=0}
-    insec && $1 == k {sub(/^[^:]*:[ ]*/, ""); print; exit}' "$CONFIG" 2>/dev/null)
+    insec && $1 == k {sub(/^[^:]*:[ ]*/, ""); sub(/[ \t]*#.*$/, ""); sub(/[ \t]+$/, ""); print; exit}' "$CONFIG" 2>/dev/null)
   printf '%s' "${v:-${3:-}}"
 }
 
@@ -80,11 +80,31 @@ rclone/rclone:${RCLONE_VERSION:-1.68}
 EOF
 }
 
+MAPS_IMAGES() { echo "opensearchproject/opensearch-maps-server:${MAPS_VERSION:-1.0.0}"; }
+AGENT_IMAGES() { echo "wazuh/wazuh-agent:$WAZUH_VERSION"; }
+TILES_URL="${TILES_URL:-https://maps.opensearch.org/offline/planet-osm-default-z0-z8.tar.gz}"
+
 archive_enabled() { grep -qs '^COMPOSE_PROFILES=.*archive' .env; }
+maps_enabled()    { grep -qs '^COMPOSE_PROFILES=.*maps'    .env; }
+agent_enabled()   { grep -qs '^COMPOSE_PROFILES=.*agent'   .env; }
+
+# add <profile> to COMPOSE_PROFILES in .env (creating the line if needed)
+enable_profile() {
+  [[ -f .env ]] || { failm "run ./generate-credentials.sh first"; exit 1; }
+  if grep -q '^COMPOSE_PROFILES=' .env; then
+    grep -q "^COMPOSE_PROFILES=.*$1" .env || \
+      sed -i.bak "s/^COMPOSE_PROFILES=.*/&,$1/" .env && rm -f .env.bak
+  else
+    echo "COMPOSE_PROFILES=$1" >> .env
+  fi
+  ok "profile '$1' enabled ($(grep '^COMPOSE_PROFILES=' .env))"
+}
 
 IMAGES() {
   CORE_IMAGES
   archive_enabled && ARCHIVE_IMAGES || true
+  maps_enabled && MAPS_IMAGES || true
+  agent_enabled && AGENT_IMAGES || true
 }
 
 inventory() {
@@ -397,7 +417,7 @@ cmd_fetch() {
     while read -r img; do
       say "    $img"
       docker pull -q "$img" >/dev/null
-    done < <(CORE_IMAGES; ARCHIVE_IMAGES)
+    done < <(CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES)
     ok "images ready (version pinned $WAZUH_VERSION)"
     local pzip="config/archive/repository-s3-$OPENSEARCH_VERSION.zip"
     if [[ ! -f "$pzip" ]]; then
@@ -406,6 +426,13 @@ cmd_fetch() {
         "https://artifacts.opensearch.org/releases/plugins/repository-s3/$OPENSEARCH_VERSION/repository-s3-$OPENSEARCH_VERSION.zip"
     fi
     ok "repository-s3 plugin cached ($pzip)"
+    local ttar="$CACHE/maps/$(basename "$TILES_URL")"
+    if [[ ! -f "$ttar" ]]; then
+      say "[*] Downloading offline map tiles (~225 MB)..."
+      mkdir -p "$CACHE/maps"
+      curl -fSL --retry 3 -o "$ttar" "$TILES_URL"
+    fi
+    ok "offline map tiles cached ($ttar)"
   else
     say "[*] Downloading native packages (pinned $WAZUH_VERSION) into $CACHE/packages ..."
     mkdir -p "$CACHE/packages/deb" "$CACHE/packages/rpm"
@@ -450,17 +477,24 @@ cmd_airgap_bundle() {
   local img missing=0
   while read -r img; do
     docker image inspect "$img" >/dev/null 2>&1 || { failm "image not present locally: $img (run fetch first)"; missing=1; }
-  done < <(CORE_IMAGES; ARCHIVE_IMAGES)
+  done < <(CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES)
   (( missing == 0 )) || exit 1
   say "    saving images -> images/wazuh-images.tar (several GB, takes a few minutes)"
   # shellcheck disable=SC2046
-  docker save -o "$out/images/wazuh-images.tar" $( (CORE_IMAGES; ARCHIVE_IMAGES) | tr '\n' ' ')
+  docker save -o "$out/images/wazuh-images.tar" $( (CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES) | tr '\n' ' ')
 
   # 1b. offline plugin zips (repository-s3 for the archive module)
   if ls config/archive/*.zip >/dev/null 2>&1; then
     mkdir -p "$out/plugins"
     cp config/archive/*.zip "$out/plugins/"
     say "    included OpenSearch plugin zips"
+  fi
+
+  # 1c. offline map tiles (maps module)
+  if ls "$CACHE"/maps/*.tar.gz >/dev/null 2>&1; then
+    mkdir -p "$out/maps"
+    cp "$CACHE"/maps/*.tar.gz "$out/maps/"
+    say "    included offline map tiles"
   fi
 
   # 2. native packages if cached (baremetal targets)
@@ -531,6 +565,11 @@ cmd_airgap_import() {
   if ls "$dir"/plugins/*.zip >/dev/null 2>&1; then
     cp "$dir"/plugins/*.zip config/archive/
     ok "OpenSearch plugin zips copied to config/archive/"
+  fi
+  if ls "$dir"/maps/*.tar.gz >/dev/null 2>&1; then
+    mkdir -p "$CACHE/maps"
+    cp "$dir"/maps/*.tar.gz "$CACHE/maps/"
+    ok "offline map tiles copied to $CACHE/maps/"
   fi
   ok "import complete"
   say "    next: ./wazuh-deploy.sh pki csr   (then sign/import + verify + deploy)"
@@ -621,6 +660,7 @@ cmd_dns() {
     echo "    @{ Name = \"indexer\";   IP = \"$host_ip\" },"
     echo "    @{ Name = \"s3\";        IP = \"$host_ip\" },"
     echo "    @{ Name = \"archive\";   IP = \"$host_ip\" },"
+    echo "    @{ Name = \"sso\";       IP = \"$host_ip\" },"
     # per-node records (docker: all = host_ip; baremetal: per-node IPs)
     awk '/- name:/{n=$3}/hostname:/{h=$2}/ip:/{print n, h, $2}' "$NODES" | \
     while read -r name fqdn ip; do
@@ -646,12 +686,60 @@ PS1
   {
     echo "# Append to /etc/hosts (Linux) or C:\\Windows\\System32\\drivers\\etc\\hosts (Windows)"
     echo "# on every client/agent if no DNS zone is available."
-    echo "$host_ip  $zone dashboard.$zone manager.$zone indexer.$zone s3.$zone archive.$zone"
+    echo "$host_ip  $zone dashboard.$zone manager.$zone indexer.$zone s3.$zone archive.$zone sso.$zone"
   } > config/dns/hosts.snippet
 
   ok "wrote config/dns/add-dns-records.ps1  (run on the Windows DNS server)"
   ok "wrote config/dns/hosts.snippet        (hosts-file fallback)"
   [[ -n "$(cfg dns server)" ]] && say "    DNS server on record: $(cfg dns server)"
+}
+
+# =================================================================== maps ====
+# Self-hosted offline maps (the air-gap equivalent of Elastic Maps Server).
+cmd_maps() {
+  require_config
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    enable)
+      enable_profile maps
+      say "    next: docker compose up -d && ./wazuh-deploy.sh maps init"
+      ;;
+    init)
+      maps_enabled || { failm "maps module not enabled - run: maps enable"; exit 1; }
+      local tar="$CACHE/maps/$(basename "$TILES_URL")"
+      if [[ ! -f "$tar" ]]; then
+        if [[ "$ENVIRONMENT" == "connected" ]]; then
+          say "[*] Downloading tiles set ($(basename "$TILES_URL"), ~225 MB)..."
+          mkdir -p "$CACHE/maps"
+          curl -fSL --retry 3 -o "$tar" "$TILES_URL"
+        else
+          failm "tiles set missing ($tar) - import an airgap bundle built after this feature"
+          exit 1
+        fi
+      fi
+      say "[*] Loading tiles into the maps volume (one-time)..."
+      docker run --rm -v multi-node_maps-tiles:/tiles \
+        -v "$PWD/$CACHE/maps:/src:ro" nginx:1.29-alpine \
+        sh -c "tar xzf /src/$(basename "$tar") --strip-components=1 -C /tiles && ls /tiles | head -3"
+      docker compose up -d maps-server >/dev/null 2>&1 || docker restart maps-server >/dev/null
+      sleep 5
+      cmd_maps status
+      ;;
+    status)
+      docker ps --filter name=maps-server --format '{{.Names}}: {{.Status}}'
+      local code
+      code=$(curl -ks --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
+        --resolve "$SIEM_DOMAIN:8080:127.0.0.1" \
+        -o /dev/null -w '%{http_code}' "https://$SIEM_DOMAIN:8080/manifest.json" || true)
+      if [[ "$code" == "200" ]]; then
+        ok "maps manifest served over TLS: https://$SIEM_DOMAIN:8080/manifest.json"
+      else
+        failm "manifest not reachable (HTTP $code) - is the maps profile up and tiles loaded?"
+        exit 1
+      fi
+      ;;
+    *) failm "usage: wazuh-deploy.sh maps {enable|init|status}"; exit 1 ;;
+  esac
 }
 
 # ================================================================ archive ====
@@ -783,6 +871,170 @@ EOF
       idx_api GET "/_cat/snapshots/wazuh-index-snapshots?h=id,status,end_time&s=end_time" 2>/dev/null | tail -5 | sed 's/^/  /'
       ;;
     *) failm "usage: wazuh-deploy.sh archive {enable|init|snapshot|status}"; exit 1 ;;
+  esac
+}
+
+# ==================================================================== sso ====
+# Keycloak OIDC single sign-on for the dashboard + indexer security plugin.
+cmd_sso() {
+  require_config
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    enable)
+      [[ -f .env ]] || { failm "run ./generate-credentials.sh first"; exit 1; }
+      grep -q '^OIDC_CLIENT_SECRET=' .env || cat >> .env <<SSOEOF
+
+# --- SSO module (Keycloak OIDC) ----------------------------------------------
+KEYCLOAK_ADMIN_PASSWORD=Kc1.$(openssl rand -hex 14)
+OIDC_CLIENT_SECRET=$(openssl rand -hex 20)
+SSO_ADMIN_PASSWORD=Sso1.$(openssl rand -hex 12)
+SSO_ANALYST_PASSWORD=Sso1.$(openssl rand -hex 12)
+SSOEOF
+      enable_profile sso
+      sed -e "s|REPLACE_WITH_OIDC_CLIENT_SECRET|$(grep '^OIDC_CLIENT_SECRET=' .env | cut -d= -f2)|" \
+          -e "s|REPLACE_WITH_SSO_ADMIN_PASSWORD|$(grep '^SSO_ADMIN_PASSWORD=' .env | cut -d= -f2)|" \
+          -e "s|REPLACE_WITH_SSO_ANALYST_PASSWORD|$(grep '^SSO_ANALYST_PASSWORD=' .env | cut -d= -f2)|" \
+          config/templates/keycloak-realm.json.tpl > config/keycloak/realm-siem.json
+      ok "realm import rendered (config/keycloak/realm-siem.json)"
+      cp config/templates/opensearch_dashboards.yml.tpl config/wazuh_dashboard/opensearch_dashboards.yml
+      cat >> config/wazuh_dashboard/opensearch_dashboards.yml <<SSOEOF
+
+# --- SSO (Keycloak OIDC) - appended by 'wazuh-deploy.sh sso enable' ----------
+opensearch_security.auth.type: ["basicauth","openid"]
+opensearch_security.auth.multiple_auth_enabled: true
+opensearch_security.ui.openid.login.buttonname: "Keycloak SSO"
+opensearch_security.openid.connect_url: "https://keycloak:8443/realms/siem/.well-known/openid-configuration"
+opensearch_security.openid.client_id: "wazuh-dashboard"
+opensearch_security.openid.client_secret: "$(grep '^OIDC_CLIENT_SECRET=' .env | cut -d= -f2)"
+opensearch_security.openid.base_redirect_url: "https://$SIEM_DOMAIN"
+opensearch_security.openid.root_ca: "/usr/share/wazuh-dashboard/certs/root-ca.pem"
+SSOEOF
+      ok "dashboard config rendered with OIDC (multiple-auth)"
+      say ""
+      say "Next:"
+      say "  ./wazuh-deploy.sh pki csr && ./wazuh-deploy.sh pki sign   # keycloak cert (idempotent)"
+      say "  docker compose up -d && docker compose up -d --force-recreate wazuh.dashboard"
+      say "  ./wazuh-deploy.sh sso init"
+      say "  (browsers need a DNS/hosts record: sso.$SIEM_DOMAIN -> host IP, port 8443)"
+      ;;
+    init)
+      grep -qs 'OIDC_CLIENT_SECRET' .env || { failm "run: sso enable first"; exit 1; }
+      say "[*] Waiting for Keycloak (realm import can take ~1 min)..."
+      local i ready=no
+      for i in $(seq 1 30); do
+        if curl -ks --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
+          --resolve "sso.$SIEM_DOMAIN:8443:127.0.0.1" \
+          "https://sso.$SIEM_DOMAIN:8443/realms/siem/.well-known/openid-configuration" \
+          | grep -q '"issuer"'; then ready=yes; break; fi
+        sleep 10
+      done
+      [[ "$ready" == "yes" ]] || { failm "Keycloak discovery not answering"; exit 1; }
+      ok "Keycloak realm 'siem' is up (OIDC discovery over TLS)"
+
+      say "[*] Applying OIDC auth + role mappings to the indexer security plugin..."
+      mkdir -p config/wazuh_indexer/security
+      cat > config/wazuh_indexer/security/config.yml <<'SECEOF'
+_meta:
+  type: "config"
+  config_version: 2
+config:
+  dynamic:
+    http:
+      anonymous_auth_enabled: false
+    authc:
+      basic_internal_auth_domain:
+        description: "Internal users (admin, kibanaserver, ...)"
+        http_enabled: true
+        transport_enabled: true
+        order: 0
+        http_authenticator:
+          type: basic
+          challenge: false
+        authentication_backend:
+          type: intern
+      openid_auth_domain:
+        description: "Keycloak OIDC (groups claim -> backend roles)"
+        http_enabled: true
+        transport_enabled: true
+        order: 1
+        http_authenticator:
+          type: openid
+          challenge: false
+          config:
+            subject_key: preferred_username
+            roles_key: groups
+            openid_connect_url: https://keycloak:8443/realms/siem/.well-known/openid-configuration
+            openid_connect_idp:
+              enable_ssl: true
+              verify_hostnames: true
+              pemtrustedcas_filepath: /usr/share/wazuh-indexer/config/certs/root-ca.pem
+        authentication_backend:
+          type: noop
+SECEOF
+      docker exec master1.indexer cat /usr/share/wazuh-indexer/config/opensearch-security/roles_mapping.yml \
+        > config/wazuh_indexer/security/roles_mapping.yml
+      python3 /dev/stdin <<'PYEOF'
+t = open("config/wazuh_indexer/security/roles_mapping.yml").read()
+def add(t, role, extra):
+    marker = f'{role}:'
+    i = t.index(marker)
+    j = t.index('backend_roles:', i)
+    k = t.index('\n', j)
+    line = t[j:k]
+    insert = k + 1
+    add_lines = ''.join(f'  - "{e}"\n' for e in extra)
+    # append after the first existing backend role line
+    m = t.index('\n', t.index('- ', insert))
+    return t[:m+1] + add_lines + t[m+1:]
+for role, extra in [("all_access", ["siem-admins"]),
+                    ("kibana_user", ["siem-analysts", "siem-readonly"]),
+                    ("readall", ["siem-analysts", "siem-readonly"])]:
+    try:
+        t = add(t, role, extra)
+    except ValueError:
+        pass
+open("config/wazuh_indexer/security/roles_mapping.yml", "w").write(t)
+print("roles_mapping patched")
+PYEOF
+      docker exec master1.indexer mkdir -p /tmp/secconf
+      docker cp config/wazuh_indexer/security/config.yml master1.indexer:/tmp/secconf/config.yml
+      docker cp config/wazuh_indexer/security/roles_mapping.yml master1.indexer:/tmp/secconf/roles_mapping.yml
+      local sa="bash /usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh -h master1.indexer -p 9200 -icl -nhnv -cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem -cert /usr/share/wazuh-indexer/config/certs/admin.pem -key /usr/share/wazuh-indexer/config/certs/admin-key.pem"
+      docker exec -e OPENSEARCH_JAVA_HOME=/usr/share/wazuh-indexer/jdk master1.indexer \
+        $sa -f /tmp/secconf/config.yml -t config >/dev/null \
+        && ok "security config.yml applied (basic + openid auth domains)" \
+        || { failm "securityadmin failed for config.yml"; exit 1; }
+      docker exec -e OPENSEARCH_JAVA_HOME=/usr/share/wazuh-indexer/jdk master1.indexer \
+        $sa -f /tmp/secconf/roles_mapping.yml -t rolesmapping >/dev/null \
+        && ok "roles mapping applied (siem-admins -> all_access; analysts/readonly -> kibana_user + readall)" \
+        || { failm "securityadmin failed for roles_mapping.yml"; exit 1; }
+
+      if [[ -f config/ism/security-audit-retention-policy.json ]]; then
+        idx_api PUT "/_plugins/_ism/policies/security-audit-retention" \
+          "$(cat config/ism/security-audit-retention-policy.json)" >/dev/null 2>&1 || true
+        ok "audit-index retention policy applied (security-auditlog-*, 180d)"
+      fi
+      ok "SSO initialized - test with: ./wazuh-deploy.sh sso status"
+      ;;
+    status)
+      local tok
+      tok=$(curl -ks --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
+        --resolve "sso.$SIEM_DOMAIN:8443:127.0.0.1" \
+        -d "client_id=wazuh-dashboard" \
+        -d "client_secret=$(grep '^OIDC_CLIENT_SECRET=' .env | cut -d= -f2)" \
+        -d "grant_type=password" -d "username=analyst1" \
+        -d "password=$(grep '^SSO_ANALYST_PASSWORD=' .env | cut -d= -f2)" \
+        "https://sso.$SIEM_DOMAIN:8443/realms/siem/protocol/openid-connect/token" \
+        | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token',''))")
+      [[ -n "$tok" ]] || { failm "could not obtain OIDC token for analyst1"; exit 1; }
+      ok "OIDC token issued for analyst1 (direct grant against the realm)"
+      docker exec master1.indexer curl -s \
+        --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem \
+        -H "Authorization: Bearer $tok" \
+        "https://master1.indexer:9200/_plugins/_security/authinfo" \
+        | python3 -c "import json,sys; d=json.load(sys.stdin); print('   user:', d.get('user_name')); print('   backend roles:', d.get('backend_roles')); print('   mapped security roles:', d.get('roles'))"
+      ;;
+    *) failm "usage: wazuh-deploy.sh sso {enable|init|status}"; exit 1 ;;
   esac
 }
 
@@ -942,6 +1194,8 @@ case "$CMD" in
                 esac ;;
   pki)          cmd_pki "$@" ;;
   dns)          cmd_dns "$@" ;;
+  maps)         cmd_maps "$@" ;;
+  sso)          cmd_sso "$@" ;;
   archive)      cmd_archive "$@" ;;
   certificates) cmd_certificates "$@" ;;
   deploy)       cmd_deploy "$@" ;;
@@ -960,6 +1214,9 @@ wazuh-deploy.sh - unified deployment CLI
   certificates                 connected one-shot PKI (csr+sign+verify)
   pki csr|export-csr|sign [--ca ...]|import [dir]|verify
   archive enable|init|snapshot|status   optional RustFS S3 long-retention module
+  maps enable|init|status               optional offline maps (self-hosted tiles)
+  sso enable|init|status                optional Keycloak OIDC single sign-on
+  dns records                           regenerate AD DNS script / hosts snippet
   deploy docker|baremetal
   verify                       runtime verification
   status

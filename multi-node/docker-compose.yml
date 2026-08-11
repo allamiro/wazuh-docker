@@ -1128,6 +1128,100 @@ services:
     networks:
       - siem
 
+  # ---------------------------------------------------------------------------
+  # Optional offline maps module (profile "maps") - self-hosted OpenSearch
+  # maps service, the air-gap equivalent of Elastic Maps Server. Tiles are
+  # loaded once via './wazuh-deploy.sh maps init'; browsers reach it as
+  # https://siem.local.domain:8443 through the nginx TLS vhost.
+  maps-server:
+    image: opensearchproject/opensearch-maps-server:${MAPS_VERSION:-1.0.0}
+    profiles: [ "maps" ]
+    hostname: maps-server
+    container_name: maps-server
+    restart: always
+    command: run
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      # NOTE: the server appends its listen port (8080) to HOST_URL when
+      # building manifest URLs - so no port here, and the nginx TLS vhost
+      # must be published on 8443 -> no: on 8080 externally
+      - HOST_URL=https://${SIEM_DOMAIN:-siem.local.domain}
+    volumes:
+      - maps-tiles:/usr/src/app/public/tiles/data/
+    networks:
+      - siem
+
+  # ---------------------------------------------------------------------------
+  # Optional agent container (profile "agent") - a real Wazuh agent that
+  # monitors THIS docker host via the docker-listener wodle (docker.sock).
+  # This is what feeds the dashboard's "Docker" module: that module shows
+  # events reported by AGENTS, so with zero agents it stays empty.
+  wazuh.agent:
+    image: wazuh/wazuh-agent:${WAZUH_VERSION:-4.14.7}
+    profiles: [ "agent" ]
+    hostname: docker-host
+    container_name: wazuh.agent
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    environment:
+      - WAZUH_MANAGER_SERVER=wazuh.master
+      - WAZUH_AGENT_NAME=docker-host
+      - WAZUH_AGENT_GROUP=default
+      - WAZUH_REGISTRATION_PASSWORD=${ENROLLMENT_PASSWORD:-}
+    volumes:
+      - ./config/wazuh_agent/ossec.conf:/wazuh-config-mount/etc/ossec.conf
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      wazuh.master:
+        condition: service_started
+    networks:
+      - siem
+
+  # ---------------------------------------------------------------------------
+  # Optional SSO module (profile "sso") - Keycloak OIDC identity provider.
+  # Groups siem-admins / siem-analysts / siem-readonly map to indexer security
+  # roles; the dashboard offers "Keycloak SSO" next to basic auth. Browsers
+  # reach it at https://sso.siem.local.domain:8444 (add the DNS record).
+  keycloak:
+    image: quay.io/keycloak/keycloak:${KEYCLOAK_VERSION:-26.0}
+    profiles: [ "sso" ]
+    hostname: keycloak
+    container_name: keycloak
+    restart: always
+    command:
+      - "start"
+      - "--import-realm"
+      - "--https-certificate-file=/tls/cert.pem"
+      - "--https-certificate-key-file=/tls/key.pem"
+      - "--hostname=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443"
+    deploy:
+      resources:
+        limits:
+          memory: ${KEYCLOAK_MEM_LIMIT:-1g}
+    ports:
+      - "8443:8443"
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-}
+      - KC_DB=dev-file
+      - KC_HTTP_ENABLED=false
+      - KC_HEALTH_ENABLED=true
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./config/wazuh_indexer_ssl_certs/keycloak.pem:/tls/cert.pem:ro
+      - ./config/wazuh_indexer_ssl_certs/keycloak-key.pem:/tls/key.pem:ro
+      - ./config/keycloak/realm-siem.json:/opt/keycloak/data/import/realm-siem.json:ro
+    networks:
+      siem:
+        aliases:
+          - sso.${SIEM_DOMAIN:-siem.local.domain}
+
   wazuh.dashboard:
     image: wazuh/wazuh-dashboard:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.dashboard
@@ -1179,6 +1273,7 @@ services:
     ports:
       - "1514:1514"
       - "1515:1515"
+      - "8080:8080"   # offline maps (TLS vhost -> maps-server)
     depends_on:
       - wazuh.master
       - wazuh.worker1
@@ -1187,8 +1282,14 @@ services:
       - wazuh.worker4
     volumes:
       - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # serves the maps vhost with the dashboard certificate (same hostname)
+      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/etc/nginx/certs/maps.pem:ro
+      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/etc/nginx/certs/maps-key.pem:ro
     networks:
-      - siem
+      siem:
+        # containers (e.g. the dashboard) resolve the public name to nginx
+        aliases:
+          - ${SIEM_DOMAIN:-siem.local.domain}
 
 networks:
   siem:
@@ -1202,6 +1303,8 @@ networks:
           ip_range: 10.77.0.128/25
 
 volumes:
+  keycloak-data:
+  maps-tiles:
   indexer-data-ml1:
   rustfs-data:
   master-wazuh-api-configuration:

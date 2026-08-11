@@ -61,6 +61,7 @@ NGINX_VERSION=1.29-alpine
 INDEXER_PASSWORD=$INDEXER_PASSWORD
 DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD
 API_PASSWORD=$API_PASSWORD
+ENROLLMENT_PASSWORD=$ENROLLMENT_PASSWORD
 
 # --- 32 GB host performance tuning (see DEPLOYMENT-GUIDE.md) -----------------
 # JVM heaps: max per tier; *_HEAP_MIN defaults to the max (recommended).

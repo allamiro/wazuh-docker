@@ -65,3 +65,8 @@ plugins.security.restapi.roles_enabled:
 plugins.security.allow_default_init_securityindex: true
 cluster.routing.allocation.disk.threshold_enabled: false
 compatibility.override_main_response_version: true
+
+# Security audit trail (admin/API actions) -> security-auditlog-* indices.
+plugins.security.audit.type: internal_opensearch
+plugins.security.audit.config.ignore_users:
+  - "kibanaserver"

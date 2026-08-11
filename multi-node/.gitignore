@@ -15,3 +15,6 @@ wazuh-airgap-*/
 csr-bundle-*.tar.gz
 config/archive/*.zip
 config/dns/
+config/wazuh_dashboard/opensearch_dashboards.yml
+config/keycloak/realm-siem.json
+config/wazuh_indexer/security/

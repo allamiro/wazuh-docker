@@ -760,6 +760,8 @@ in git); the enrollment password is also in
 | **Agent events** | `siem.local.domain:1514` (TCP) | Wazuh agent protocol — enrolled agents only |
 | **Agent enrollment** | `siem.local.domain:1515` (TLS) | enrollment password from `authd.pass`; CA-signed manager cert |
 | **RustFS S3** (archive module) | `https://rustfs:9000` — internal to the `siem` network only | `S3_ACCESS_KEY` / `S3_SECRET_KEY` from `.env` |
+| **Offline maps** (maps module) | `https://siem.local.domain:8080/manifest.json` | none (public tiles) |
+| **Keycloak** (sso module) | `https://sso.siem.local.domain:8443` (admin console + OIDC) | console: `admin` / `KEYCLOAK_ADMIN_PASSWORD`; users: `ssoadmin`, `analyst1` (`SSO_*_PASSWORD`), all in `.env` |
 | **Internal service user** `kibanaserver` | dashboard → indexer | `DASHBOARD_PASSWORD` from `.env` — not for humans |
 | **Root CA** | `multi-node/config/wazuh_indexer_ssl_certs/root-ca.pem` | import into browser/OS trust stores |
 | **CA private key** | `multi-node/config/certs-ca/` | signing only — move to offline storage |

@@ -49,11 +49,15 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 | Long-term retention (RustFS S3 archive) | [docs/ARCHIVE.md](docs/ARCHIVE.md) |
 | Rootless Podman / SELinux hosts | [docs/PODMAN.md](docs/PODMAN.md) |
 
-Optional modules: `./wazuh-deploy.sh archive enable` adds **RustFS**
-S3 storage (index snapshots + raw-event archives, 1–7 year retention);
-`COMPOSE_PROFILES=ml` adds a dedicated **OpenSearch ML node**. External
-**Windows AD DNS / ADCS** integration is built in
-(`./wazuh-deploy.sh dns records`, `pki export-csr`).
+Optional modules (each one command to enable): **RustFS S3 archive**
+(`archive enable` — snapshots + raw-event retention), **offline maps**
+(`maps enable` — self-hosted tiles, the air-gap answer to Elastic Maps
+Server), **Keycloak SSO** (`sso enable` — OIDC login with
+admin/analyst/readonly groups + audit trail, see
+[docs/SSO.md](docs/SSO.md)), a dedicated **OpenSearch ML node**
+(`COMPOSE_PROFILES=+ml`), and a **host-monitoring agent container** with the
+docker-listener wodle (`agent` profile). External **Windows AD DNS / ADCS**
+integration is built in (`dns records`, `pki export-csr`).
 
 The single-purpose tools (`generate-certs.sh`, `generate-credentials.sh`,
 `deploy-certs.sh`, `docker compose`) all remain directly usable —
