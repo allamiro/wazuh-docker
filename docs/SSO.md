@@ -54,6 +54,36 @@ Private per-user tenants are disabled deliberately (they fragment content and
 complicate backups). Add a workspace by naming a new tenant in
 `sso-groups.conf` — it is created automatically.
 
+### Using tenants in the dashboard
+
+**Switch workspace:** avatar (top-right) → **Switch tenants** → pick `Global`
+or a custom tenant, then **Confirm**.
+
+**See/manage all tenants:** ☰ menu → **Management → Security → Tenants**
+(direct link: `https://siem.local.domain/app/security-dashboards-plugin#/tenants`).
+The list shows every tenant, who can reach it, and how many saved objects it
+holds; the row menu also switches to it.
+
+What each shipped account is offered (verified):
+
+| User | Tenants offered |
+|---|---|
+| `analyst1` (siem-analysts) | `Global`, `soc` |
+| `ssoadmin` (siem-admins) | `Global`, `soc`, `admin_tenant` |
+| `admin` (local, basic auth) | all |
+
+Private per-user tenants exist at the security-plugin level but are hidden by
+`multitenancy.tenants.enable_private: false`.
+
+**Expect a new tenant to look empty** — that is the point. Wazuh's own module
+dashboards live in `Global`, so a team switching to `soc` starts with a blank
+workspace for its own saved objects. To work there you need index patterns in
+that tenant: **Management → Stack Management → Index Patterns → Create**
+(`wazuh-alerts-*`), or export them from `Global` under **Saved Objects** and
+import them after switching. Practical split: leave everyone in `Global` for
+the Wazuh modules (Threat Hunting, MITRE, …), and use custom tenants for a
+team's own dashboards and saved searches.
+
 **Important:** a tenant separates *saved objects* (dashboards, visualizations,
 saved searches), **not the data behind them**. Two teams in different tenants
 still query the same alerts unless you also scope the data. For real
