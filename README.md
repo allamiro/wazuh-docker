@@ -16,42 +16,42 @@ tooling, upstream docs) has been removed on purpose.
 | PKI | Explicit lifecycle — **key → CSR → CA signing → import → verify → deploy** — driven by one canonical inventory (26 certs: 1 root CA + 25 identities), signed by a bundled step-ca/openssl CA or your corporate PKI (ADCS/EJBCA/…) |
 | Sizing | Tuned for a single 32 GB RAM server |
 
-## Quick start
+## Quick start — one CLI, four modes
 
 ```bash
 cd multi-node
-
-# 1. Generate credentials (passwords, bcrypt hashes, cluster key)
-./generate-credentials.sh
-
-# 2. Generate TLS private keys + CSRs (keys never leave this host)
-./generate-certs.sh csr
-
-# 3. Sign the CSRs
-./generate-certs.sh sign --ca step       # Option A: bundled Step CA container
-./generate-certs.sh sign --ca openssl    # Option B: bundled OpenSSL CA
-# Option C: corporate CA - submit config/wazuh_indexer_ssl_certs/csr/*.csr
-#           to your PKI, copy the signed certs back, then:
-#           ./generate-certs.sh import
-
-# 4. Validate certificates (deployment gate - blocks on any failure)
-./generate-certs.sh verify
-
-# 5. Start Wazuh
-./deploy-certs.sh docker
-docker compose up -d
+./wazuh-deploy.sh configure     # pick: connected|airgap × docker|baremetal × CA
 ```
 
-Log in at `https://siem.local.domain` as `admin` with the password printed by
-`generate-credentials.sh` (stored in `multi-node/.env`).
+then follow the next-steps it prints. Example (air-gapped + Docker):
 
-`./generate-certs.sh` with no arguments still runs all three PKI stages in
-sequence, printing each stage explicitly.
+```bash
+./generate-credentials.sh
+./wazuh-deploy.sh airgap import /media/wazuh-airgap-4.14.7   # bundle built on a connected host
+./wazuh-deploy.sh pki csr
+./wazuh-deploy.sh pki sign --ca step     # or: pki export-csr → corporate CA → pki import
+./wazuh-deploy.sh pki verify
+./wazuh-deploy.sh deploy docker
+./wazuh-deploy.sh verify
+```
 
-Deploying on **VMs / bare metal** instead of Docker? The same PKI material is
-packaged per node with `./deploy-certs.sh export` — see the guide.
+Connected environments get a shorter path (`fetch` + one-shot
+`certificates`). Log in at `https://siem.local.domain` as `admin` with the
+password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
+
+| Mode | Walkthrough |
+|---|---|
+| Connected (Docker or VM) | [docs/CONNECTED.md](docs/CONNECTED.md) |
+| Air-gapped (bundle/import) | [docs/AIRGAP.md](docs/AIRGAP.md) |
+| Docker specifics | [docs/DOCKER.md](docs/DOCKER.md) |
+| VM / bare-metal specifics | [docs/BAREMETAL.md](docs/BAREMETAL.md) |
+| PKI deep reference | [docs/PKI.md](docs/PKI.md) |
+
+The single-purpose tools (`generate-certs.sh`, `generate-credentials.sh`,
+`deploy-certs.sh`, `docker compose`) all remain directly usable —
+`wazuh-deploy.sh` is an orchestration layer, not a replacement.
 
 **Read [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) before deploying for real** —
-it covers the air-gap image transfer, DNS/hostnames (AD DNS or `/etc/hosts`),
-the certificate inventory and corporate-CA workflow, memory budget, agent
-enrollment, ISM data tiering, and operations.
+decision tree, four quick starts, DNS/hostnames (AD DNS or `/etc/hosts`),
+certificate inventory, memory budget, agent enrollment, ISM data tiering,
+and operations.

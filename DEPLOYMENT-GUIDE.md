@@ -15,6 +15,100 @@ Compose stack (model A) or a fleet of VMs/bare-metal servers (model B).
 
 ---
 
+## 0. Choosing your path
+
+```text
+                        START
+                          │
+               Is the network connected?
+                   /              \
+                 YES              NO
+                  │                │
+             Connected          Air-gap
+                  │                │
+   ./wazuh-deploy.sh fetch    bundle on a connected host,
+                  │           ./wazuh-deploy.sh airgap import
+                  └───────┬────────┘
+                          │
+                   Deployment type?
+                    /           \
+                 Docker       VM/Bare metal
+                    │             │
+                 Compose       Native packages
+                    │             │
+                    └─────┬───────┘
+                          │
+                         PKI  (one-shot when connected,
+                          │    staged csr→sign→import when air-gapped)
+                          │
+              ./wazuh-deploy.sh validate
+                          │
+              ./wazuh-deploy.sh deploy <platform>
+                          │
+              ./wazuh-deploy.sh verify
+```
+
+Everything is driven by one CLI — `multi-node/wazuh-deploy.sh` — configured
+once via `./wazuh-deploy.sh configure` (interactive, or flags for
+automation). It orchestrates the underlying single-purpose tools
+(`generate-credentials.sh`, `generate-certs.sh`, `deploy-certs.sh`, the
+pinned `docker-compose.yml`), which all remain usable directly.
+
+### Quick Start A — Connected + Docker
+
+```bash
+cd multi-node
+./wazuh-deploy.sh configure          # connected + docker + bundled CA
+./generate-credentials.sh
+./wazuh-deploy.sh fetch
+./wazuh-deploy.sh certificates      # one-shot PKI
+./wazuh-deploy.sh deploy docker
+./wazuh-deploy.sh verify
+```
+
+### Quick Start B — Connected + VM/bare metal
+
+```bash
+cd multi-node
+./wazuh-deploy.sh configure          # connected + baremetal; set IPs in config/nodes.yml
+./generate-credentials.sh
+./wazuh-deploy.sh fetch              # pinned deb/rpm packages
+./wazuh-deploy.sh certificates
+./wazuh-deploy.sh deploy baremetal   # per-node dist/ packages → install.sh on each node
+```
+
+### Quick Start C — Air-gapped + Docker
+
+```bash
+# connected staging host:
+./wazuh-deploy.sh configure --non-interactive --environment airgap --platform docker
+./wazuh-deploy.sh fetch && ./wazuh-deploy.sh airgap bundle
+# air-gapped target (after media transfer):
+./wazuh-deploy.sh airgap import /media/wazuh-airgap-4.14.7
+./generate-credentials.sh
+./wazuh-deploy.sh pki csr && ./wazuh-deploy.sh pki sign --ca step
+./wazuh-deploy.sh pki verify
+./wazuh-deploy.sh deploy docker && ./wazuh-deploy.sh verify
+```
+
+### Quick Start D — Air-gapped + VM/bare metal
+
+```bash
+# as C, but: --platform baremetal (bundle then also carries deb/rpm packages)
+./wazuh-deploy.sh airgap import /media/wazuh-airgap-4.14.7
+./generate-credentials.sh
+./wazuh-deploy.sh pki csr
+./wazuh-deploy.sh pki export-csr     # corporate offline CA … pki import <dir>
+./wazuh-deploy.sh pki verify
+./wazuh-deploy.sh deploy baremetal   # then per node: install.sh + verify.sh
+```
+
+Mode walkthroughs: [docs/CONNECTED.md](docs/CONNECTED.md) ·
+[docs/AIRGAP.md](docs/AIRGAP.md) · [docs/DOCKER.md](docs/DOCKER.md) ·
+[docs/BAREMETAL.md](docs/BAREMETAL.md) · deep PKI: [docs/PKI.md](docs/PKI.md)
+
+---
+
 ## 1. Architecture
 
 ```
@@ -216,242 +310,32 @@ default in the manager templates because it needs the online Wazuh CTI feed.
 
 ---
 
-## 5. PKI — the certificate lifecycle
+## 5. PKI — the certificate lifecycle (summary)
+
+The lifecycle is explicit and staged, driven by one canonical inventory
+([`multi-node/config/certs-inventory.conf`](multi-node/config/certs-inventory.conf)):
 
 ```text
-                  CERTIFICATE WORKFLOW
-
-   Wazuh deployment host
-            |
-            | ./generate-certs.sh csr
-            | (generate keys, generate CSRs)
-            v
-   config/wazuh_indexer_ssl_certs/csr/*.csr
-            |
-            +----------------------------+
-            |                            |
-            v                            v
-       Local CA                      Corporate CA
-    Step / OpenSSL               ADCS / EJBCA / Step / ...
-  ./generate-certs.sh sign        (transfer .csr files ONLY)
-            |                            |
-            | sign CSR                   | sign CSR
-            +-------------+--------------+
-                          |
-                          v
-                Signed certificates
-                          |
-                          | copy back + ./generate-certs.sh import
-                          v
-             Wazuh deployment host
-                          |
-                  install CA chain (root-ca.pem)
-                          |
-              ./generate-certs.sh verify   ← deployment gate
-                          |
-                          v
-                 docker compose up -d
+private key → CSR → CA signing → signed certificate → import → verify → deploy
 ```
 
-**The private keys never leave the deployment host. The CA only ever sees
-CSRs. The CSR is an issuance artifact — nothing consumes it at runtime; each
-service runs on `<name>.pem` + `<name>-key.pem` + `root-ca.pem` only.**
+- **26 certificates**: 1 root CA + 25 identities — 16 indexer nodes
+  (mutual-TLS transport + REST), 1 `admin` client, 5 Filebeat clients,
+  dedicated `wazuh.master-api` (55000), dedicated `wazuh.master-enrollment`
+  (1515), 1 dashboard. The manager cluster (1516) and agent events (1514)
+  use Wazuh's own key mechanisms — no X.509 by design.
+- Connected mode: `./wazuh-deploy.sh certificates` (one shot).
+  Air-gap / corporate CA: `pki csr` → `pki sign --ca step|openssl` **or**
+  `pki export-csr` → external signing → `pki import <dir>` → `pki verify`.
+- `pki verify` is the deployment gate — key↔cert match, chain (intermediates
+  supported), CN pinning, SANs, EKUs, validity, key strength; any failure
+  blocks `deploy`.
+- Private keys never leave the host; the CA key (`config/certs-ca/`) is used
+  only for signing and goes to offline storage afterwards.
 
-### 5.1 The canonical inventory
-
-Every identity is defined **once**, in
-[`multi-node/config/certs-inventory.conf`](multi-node/config/certs-inventory.conf)
-(`name|role|sans|required_ekus`). CSR generation, both bundled CAs, the
-verifier, and the deployment adapters all parse that file — the lists cannot
-drift apart. Change an identity there, never in the scripts.
-
-**26 certificates total: 1 root CA + 25 leaf identities:**
-
-| # | Identity (CN) | Role | Service / purpose | Required EKUs |
-|---|---|---|---|---|
-| 1 | `SIEM Root CA` | trust anchor | signs everything; key kept offline | — |
-| 2–17 | `master1-3 / hot1-3 / warm1-3 / cold1-3 / ingest1-2 / coord1-2 .indexer` | indexer | node identity for mutual-TLS transport (9300) + HTTPS REST (9200) | serverAuth + clientAuth |
-| 18 | `admin` | admin-client | securityadmin client identity (`authcz.admin_dn`) — keep off servers when possible | clientAuth |
-| 19–23 | `wazuh.master`, `wazuh.worker1-4` | filebeat | Filebeat **client** identity → indexers | clientAuth |
-| 24 | `wazuh.master-api` | wazuh-api | Wazuh API server cert on 55000 (replaces the self-signed one the API otherwise generates) | serverAuth |
-| 25 | `wazuh.master-enrollment` | authd | agent-enrollment server cert on 1515 (`sslmanager.cert`) | serverAuth |
-| 26 | `wazuh.dashboard` | dashboard | HTTPS cert browsers see on 443 (`siem.local.domain` SAN) | serverAuth |
-
-SANs per identity are in the inventory file; every indexer/admin certificate's
-full subject must be exactly `CN=<name>` because it is pinned verbatim in
-`plugins.security.nodes_dn` / `authcz.admin_dn`.
-
-### 5.2 Phase 1 — generate keys and CSRs
-
-```bash
-cd multi-node
-./generate-certs.sh csr           # add SIEM_DOMAIN=... for a different zone
-```
-
-For every identity this writes:
-
-```
-config/wazuh_indexer_ssl_certs/<name>-key.pem   private key  (STAYS HERE)
-config/wazuh_indexer_ssl_certs/csr/<name>.csr   the CSR for the CA
-config/wazuh_indexer_ssl_certs/csr/<name>.cnf   the openssl request config —
-                                                auditable record of the exact
-                                                CN/SANs/EKUs requested
-```
-
-Each `.cnf` requests `serverAuth`/`clientAuth` per the inventory, the CN, and
-all DNS SANs, e.g. for `hot1.indexer`:
-
-```ini
-[req]
-default_md = sha256
-prompt = no
-distinguished_name = dn
-req_extensions = ext
-[dn]
-CN = hot1.indexer
-[ext]
-basicConstraints = CA:FALSE
-keyUsage         = critical, digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth, clientAuth
-subjectAltName   = DNS:hot1.indexer,DNS:hot1.siem.local.domain
-```
-
-This phase never creates leaf certificates, and re-running it never
-overwrites existing keys or CSRs (`[SKIP] ...`) unless you pass `--force`.
-
-### 5.3 Phase 2A — bundled Step CA signs the CSRs
-
-```bash
-./generate-certs.sh sign --ca step
-```
-
-Creates the root CA in `config/certs-ca/` on first run (RSA-4096, 10 y),
-then signs **the existing CSRs** — it refuses to run if CSRs are missing and
-never regenerates them silently. Certificates land as
-`config/wazuh_indexer_ssl_certs/<name>.pem`, exactly the names Docker Compose
-mounts; existing certificates are `[SKIP]`ped without `--force`. CN and SANs
-come from the CSR; step's leaf profile issues serverAuth+clientAuth.
-
-### 5.4 Phase 2B — bundled OpenSSL CA signs the CSRs
-
-```bash
-./generate-certs.sh sign --ca openssl
-```
-
-Same contract, pure host openssl (no container needed): extensions (EKUs +
-SANs) are applied from the same canonical inventory the CSRs were built from,
-so issued certificates cannot drift from the requested identities.
-
-### 5.5 Phase 2C — corporate / external CA (ADCS, EJBCA, external step-ca, …)
-
-Stop after phase 1 and transfer **only** the CSR files
-(`config/wazuh_indexer_ssl_certs/csr/*.csr`) to your CA environment.
-Request a profile/template that:
-
-- **preserves the CSR's CN and SANs**, and
-- issues **both `serverAuth` and `clientAuth`** for indexer and Filebeat
-  identities (server-only certs **will break** the indexer transport layer —
-  nodes authenticate to each other as TLS clients).
-
-Signing examples:
-
-```bash
-# external step-ca
-step ca sign hot1.indexer.csr hot1.indexer.pem
-```
-
-```powershell
-# Microsoft ADCS (template must allow client+server auth and CSR SANs)
-certreq -submit -attrib "CertificateTemplate:WazuhNode" hot1.indexer.csr
-```
-
-```bash
-# standalone OpenSSL CA - a ready-made config is shipped at
-# multi-node/config/templates/openssl-ca.cnf (copy_extensions=copy keeps SANs)
-openssl ca -config openssl-ca.cnf -extensions server_client_ext \
-  -in hot1.indexer.csr -out hot1.indexer.pem -batch -notext
-```
-
-Copy the signed certificates back as
-`config/wazuh_indexer_ssl_certs/<name>.pem` (exact names from the inventory),
-and install the trust chain as `config/wazuh_indexer_ssl_certs/root-ca.pem`.
-
-**Intermediate CAs** — if your PKI signs leaves from an intermediate:
-
-```text
-root-ca.pem      = intermediate.pem + root.pem      (in that order)
-<name>.pem       = leaf certificate + intermediate  (in that order)
-                   do NOT append the root to leaf files
-```
-
-The verifier fully supports both chained and direct-root layouts.
-
-### 5.6 Phase 3 — import and verify (deployment gate)
-
-```bash
-./generate-certs.sh import    # checks all expected files exist, then verifies
-./generate-certs.sh verify    # the preflight gate, run any time
-```
-
-`verify` needs **no CA key**. For the root CA and every one of the 25 leaf
-identities it checks: file present · private key present · key matches the
-certificate (public-key SHA-256 comparison) · chains to `root-ca.pem`
-(catches wrong CA, expired, not-yet-valid) · subject/CN correct (exact
-`CN=<name>` where `nodes_dn` pins it) · every required SAN present · every
-required EKU present · key strength (RSA ≥ 2048 / EC ≥ 256) · 30-day expiry
-warning. Output:
-
-```text
-Certificate preflight
-======================
-
-[OK] Root CA
-[OK] master1.indexer
-...
-[OK] wazuh.dashboard
-
-26/26 certificates valid.
-
-TLS certificate validation PASSED.
-
-It is now safe to run:
-
-  docker compose up -d
-```
-
-Any failure prints the reason and **blocks deployment** (non-zero exit):
-
-```text
-[FAIL] hot2.indexer
-       Certificate SAN does not contain: hot2.siem.local.domain
-
-DEPLOYMENT BLOCKED.
-```
-
-The same key/cert match can be run manually on any node:
-
-```bash
-openssl pkey -in hot1.indexer-key.pem -pubout -outform DER | openssl dgst -sha256
-openssl x509 -in hot1.indexer.pem -pubkey -noout | openssl pkey -pubin -pubout -outform DER | openssl dgst -sha256
-# the two hashes must match
-openssl verify -CAfile root-ca.pem hot1.indexer.pem
-```
-
-### 5.7 CA key protection
-
-`config/certs-ca/root-ca.key` exists **only** for the bundled CA modes and is
-used **only** by `sign`. It is never mounted into any container and is not
-required at runtime — the stack needs only `root-ca.pem`, the leaf certs and
-leaf keys. **After issuance, move `config/certs-ca/` to offline protected
-storage** (encrypted media, vault). With a corporate CA, no CA key ever
-exists on this host at all.
-
-### 5.8 Renewal
-
-Delete the expiring `<name>.pem`, re-run the sign phase (bundled CA) or
-re-submit the retained CSR (corporate CA), `./generate-certs.sh verify`, then
-`docker compose restart <service>`. Rolling one indexer at a time keeps the
-cluster green. Keys and CSRs are reused unless you `csr --force`.
+Full reference — per-phase commands, ADCS/EJBCA/openssl-ca signing recipes,
+the CSR `.cnf` format, intermediate-chain ordering, renewal:
+**[docs/PKI.md](docs/PKI.md)**.
 
 ---
 
@@ -466,59 +350,16 @@ cluster green. Keys and CSRs are reused unless you `csr --force`.
                │                       │
                ▼                       ▼
         Docker multi-node       VM / bare-metal
-      ./deploy-certs.sh docker  ./deploy-certs.sh export
+   ./wazuh-deploy.sh deploy    ./wazuh-deploy.sh deploy
+          docker                    baremetal
+   (compose mounts certs;      (dist/<node>/ packages:
+    CA key never mounted)       own key + cert + chain
+                                + install.sh + verify.sh)
 ```
 
-### Model A — Docker
-
-Compose only **mounts** the validated files from
-`config/wazuh_indexer_ssl_certs/` — it never creates identities, and the CA
-key is never mounted anywhere. Before starting:
-
-```bash
-./deploy-certs.sh docker     # preflight + verifies every compose mount exists
-docker compose up -d
-```
-
-### Model B — VMs / bare metal
-
-```bash
-./deploy-certs.sh export                     # every identity
-./deploy-certs.sh vm --node master1.indexer  # a single node
-```
-
-builds per-node packages:
-
-```text
-dist/master1.indexer/
-├── master1.indexer.pem
-├── master1.indexer-key.pem
-├── root-ca.pem
-├── SHA256SUMS
-└── INSTALL.txt     ← role-specific target paths + local verify commands
-```
-
-Rules the tooling enforces/encodes:
-
-- **A node receives only its own private key** — `master1.indexer-key.pem`
-  must never exist on `hot1`, `wazuh.master`, or anywhere else. Each package
-  contains exactly: own key, own cert, trust chain.
-- Nothing is ever pushed over SSH automatically — in air-gapped environments
-  certificate material moves through your controlled administrative channel.
-- Install paths follow the official bare-metal layout
-  (`/etc/wazuh-indexer/certs`, `/etc/filebeat/certs`,
-  `/var/ossec/api/configuration/ssl/`, `/var/ossec/etc/sslmanager.*`,
-  `/etc/wazuh-dashboard/certs`) — each `INSTALL.txt` spells them out.
-- **Verify twice**: centrally (`./generate-certs.sh verify` before export)
-  and locally on each target after installation (commands in `INSTALL.txt`).
-
-**Higher-security variant — local key generation:** for maximum-assurance
-environments, generate each node's key + CSR *on that node* (copy its
-`csr/<name>.cnf` there and run `openssl genrsa` + `openssl req` with it, or
-use the inventory line as reference), send only the CSR to the CA, and
-install the returned certificate locally. The key then never exists anywhere
-but its own server. The central flow remains the convenient default for
-single-host Docker deployments.
+Docker specifics: [docs/DOCKER.md](docs/DOCKER.md). VM/bare-metal — per-node
+packages, official install paths, local verification, higher-security
+node-local key generation: [docs/BAREMETAL.md](docs/BAREMETAL.md).
 
 ---
 
@@ -547,6 +388,14 @@ that locks services out until the security index is rebuilt).
 
 ## 8. Deploy
 
+The one-command path (wraps everything below):
+
+```bash
+./wazuh-deploy.sh deploy docker    # = validate → cert/mount preflight → compose up
+```
+
+Or the underlying tools directly:
+
 ```bash
 # 1. credentials
 ./generate-credentials.sh
@@ -560,6 +409,13 @@ that locks services out until the security index is rebuilt).
 ./deploy-certs.sh docker
 docker compose up -d                    # first boot takes 3-6 minutes
 ```
+
+`./wazuh-deploy.sh validate` runs the full preflight (config, credentials,
+cluster key, certificate preflight, pinned images, kernel/memory/disk, DNS)
+and prints `PREFLIGHT PASSED` or `DEPLOYMENT BLOCKED` with the exact problem;
+`./wazuh-deploy.sh verify` performs the post-deploy runtime verification
+(containers, both clusters, Filebeat, chain-verified API/dashboard/enrollment
+certificates, agent ports).
 
 ### Verify the running stack
 

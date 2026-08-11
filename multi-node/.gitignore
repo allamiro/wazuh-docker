@@ -8,3 +8,8 @@ config/wazuh_cluster/authd.pass
 config/wazuh_indexer/internal_users.yml
 config/wazuh_dashboard/wazuh.yml
 dist/
+config/deployment.yml
+config/nodes.yml
+airgap-cache/
+wazuh-airgap-*/
+csr-bundle-*.tar.gz

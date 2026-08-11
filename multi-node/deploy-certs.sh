@@ -133,6 +133,58 @@ identity, and wipe intermediate copies.
 EOF
   } > "$pkg/INSTALL.txt"
 
+  # role-specific install.sh (run as root on the target server)
+  local dest owner=""
+  case "$role" in
+    indexer)   dest=/etc/wazuh-indexer/certs;   owner=wazuh-indexer:wazuh-indexer ;;
+    filebeat)  dest=/etc/filebeat/certs ;;
+    dashboard) dest=/etc/wazuh-dashboard/certs; owner=wazuh-dashboard:wazuh-dashboard ;;
+    wazuh-api) dest=/var/ossec/api/configuration/ssl ;;
+    authd)     dest=/var/ossec/etc ;;
+    *)         dest="" ;;
+  esac
+  if [[ -n "$dest" ]]; then
+    {
+      echo '#!/usr/bin/env bash'
+      echo '# Installs this node'"'"'s certificate material into the official Wazuh paths.'
+      echo '# Run as root on the target server, from inside this directory.'
+      echo 'set -euo pipefail'
+      echo 'cd "$(dirname "$0")"'
+      echo "mkdir -p $dest"
+      case "$role" in
+        wazuh-api)
+          echo "install -m 400 $name.pem $dest/server.crt"
+          echo "install -m 400 $name-key.pem $dest/server.key"
+          echo "chown root:wazuh $dest/server.crt $dest/server.key 2>/dev/null || true" ;;
+        authd)
+          echo "install -m 400 $name.pem $dest/sslmanager.cert"
+          echo "install -m 400 $name-key.pem $dest/sslmanager.key" ;;
+        *)
+          echo "install -m 400 $name.pem $name-key.pem root-ca.pem $dest/"
+          [[ -n "$owner" ]] && echo "chown -R $owner $dest"
+          echo "chmod 500 $dest" ;;
+      esac
+      echo 'echo "installed - now run ./verify.sh, then restart the service"'
+    } > "$pkg/install.sh"
+    chmod +x "$pkg/install.sh"
+  fi
+
+  # local post-install verification (no CA key needed)
+  cat > "$pkg/verify.sh" <<EOF
+#!/usr/bin/env bash
+# Local verification for the '$name' certificate package.
+set -euo pipefail
+cd "\$(dirname "\$0")"
+openssl verify -CAfile root-ca.pem -untrusted $name.pem $name.pem
+kh=\$(openssl pkey -in $name-key.pem -pubout -outform DER | openssl dgst -sha256 -r | cut -d' ' -f1)
+ch=\$(openssl x509 -in $name.pem -pubkey -noout | openssl pkey -pubin -pubout -outform DER | openssl dgst -sha256 -r | cut -d' ' -f1)
+[[ "\$kh" == "\$ch" ]] && echo "key matches certificate" || { echo "KEY/CERT MISMATCH"; exit 1; }
+openssl x509 -in $name.pem -noout -checkend 2592000 >/dev/null \\
+  && echo "validity: >30 days remaining" || echo "WARNING: expires within 30 days"
+echo "PASS: $name"
+EOF
+  chmod +x "$pkg/verify.sh"
+
   ( cd "$pkg" && openssl dgst -sha256 -r ./*.pem > SHA256SUMS )
   echo "[PKG ] $pkg/"
 }
