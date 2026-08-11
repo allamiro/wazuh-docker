@@ -61,6 +61,8 @@ services:
       - ./config/wazuh_indexer_ssl_certs/wazuh.master.pem:/etc/ssl/filebeat.pem
       - ./config/wazuh_indexer_ssl_certs/wazuh.master-key.pem:/etc/ssl/filebeat.key
       - ./config/wazuh_cluster/wazuh_manager.conf:/wazuh-config-mount/etc/ossec.conf
+      # offline CVE feed for vulnerability detection (air-gap safe)
+      - ./airgap-cache/cti:/cti:ro
       - ./config/wazuh_cluster/authd.pass:/wazuh-config-mount/etc/authd.pass
       # dedicated CA-signed cert for agent enrollment (authd, port 1515)
       - ./config/wazuh_indexer_ssl_certs/wazuh.master-enrollment.pem:/wazuh-config-mount/etc/sslmanager.cert
@@ -1160,7 +1162,7 @@ services:
   # This is what feeds the dashboard's "Docker" module: that module shows
   # events reported by AGENTS, so with zero agents it stays empty.
   wazuh.agent:
-    image: wazuh/wazuh-agent:${WAZUH_VERSION:-4.14.7}
+    image: ${AGENT_IMAGE:-wazuh-agent-docker}:${WAZUH_VERSION:-4.14.7}
     profiles: [ "agent" ]
     hostname: docker-host
     container_name: wazuh.agent
@@ -1175,6 +1177,10 @@ services:
       - WAZUH_AGENT_GROUP=default
       - WAZUH_REGISTRATION_PASSWORD=${ENROLLMENT_PASSWORD:-}
     volumes:
+      # persist the enrollment key: without this a recreated container tries to
+      # enroll again and the manager rejects it as a duplicate agent name
+      - agent-wazuh-etc:/var/ossec/etc
+      - agent-wazuh-queue:/var/ossec/queue
       - ./config/wazuh_agent/ossec.conf:/wazuh-config-mount/etc/ossec.conf
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
@@ -1303,6 +1309,8 @@ networks:
           ip_range: 10.77.0.128/25
 
 volumes:
+  agent-wazuh-etc:
+  agent-wazuh-queue:
   keycloak-data:
   maps-tiles:
   indexer-data-ml1:

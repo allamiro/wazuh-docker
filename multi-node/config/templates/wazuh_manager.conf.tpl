@@ -97,13 +97,17 @@
     <skip_nfs>yes</skip_nfs>
   </sca>
 
-  <!-- Vulnerability detection is disabled by default: it requires the online
-       Wazuh CTI feed, which is unreachable from an air-gapped network.
-       See DEPLOYMENT-GUIDE.md if you have an internal feed mirror. -->
+  <!-- Vulnerability detection using an OFFLINE CTI snapshot: the CVE feed is
+       downloaded on a connected host ('./wazuh-deploy.sh fetch', carried in
+       the air-gap bundle) and mounted read-only at /cti/cves.zip. Nothing
+       here reaches the internet. Refresh the snapshot periodically - re-run
+       fetch and restart the master. In a cluster this module runs on the
+       master node only. -->
   <vulnerability-detection>
-    <enabled>no</enabled>
+    <enabled>yes</enabled>
     <index-status>yes</index-status>
     <feed-update-interval>60m</feed-update-interval>
+    <offline-url>file:///cti/cves.zip</offline-url>
   </vulnerability-detection>
 
   <indexer>
