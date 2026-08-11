@@ -736,6 +736,98 @@ services:
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
+  cold2.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
+    hostname: cold2.indexer
+    container_name: cold2.indexer
+    restart: always
+    cpu_shares: ${IDX_COLD_CPU_SHARES:-512}
+    environment:
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP_MIN:-${IDX_COLD_HEAP:-768m}} -Xmx${IDX_COLD_HEAP:-768m}"
+      - "bootstrap.memory_lock=${MEMORY_LOCK:-true}"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_COLD_MEM_LIMIT:-1536m}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
+      - indexer-data-cold2:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/cold2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/cold2.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.pem
+      - ./config/wazuh_indexer/cold2.indexer.yml:/opensearch.node.yml:ro
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  cold3.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
+    # root only for the init wrapper (plugin/truststore/keystore setup);
+    # the stock entrypoint then drops to the wazuh-indexer user
+    user: "0"
+    hostname: cold3.indexer
+    container_name: cold3.indexer
+    restart: always
+    cpu_shares: ${IDX_COLD_CPU_SHARES:-512}
+    environment:
+      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
+      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
+      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP_MIN:-${IDX_COLD_HEAP:-768m}} -Xmx${IDX_COLD_HEAP:-768m}"
+      - "bootstrap.memory_lock=${MEMORY_LOCK:-true}"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_COLD_MEM_LIMIT:-1536m}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
+      - ./config/archive:/archive:ro
+      - indexer-data-cold3:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/cold3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/cold3.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.pem
+      - ./config/wazuh_indexer/cold3.indexer.yml:/opensearch.node.yml:ro
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
   ingest1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
     entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
@@ -1514,6 +1606,8 @@ volumes:
   indexer-data-warm2:
   indexer-data-warm3:
   indexer-data-cold1:
+  indexer-data-cold2:
+  indexer-data-cold3:
   indexer-data-ingest1:
   indexer-data-ingest2:
   indexer-data-coord1:

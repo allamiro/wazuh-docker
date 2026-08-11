@@ -63,29 +63,27 @@ DASHBOARD_PASSWORD=$DASHBOARD_PASSWORD
 API_PASSWORD=$API_PASSWORD
 ENROLLMENT_PASSWORD=$ENROLLMENT_PASSWORD
 
-# --- 32 GB host performance tuning (see DEPLOYMENT-GUIDE.md) -----------------
+# --- 48 GB host performance tuning (see DEPLOYMENT-GUIDE.md) -----------------
 # JVM heaps: max per tier; *_HEAP_MIN defaults to the max (recommended).
 # cpu_shares: relative CPU priority under contention (hot/ingest highest).
-IDX_MASTER_HEAP=512m
-IDX_MASTER_MEM_LIMIT=1g
-IDX_HOT_HEAP=1536m
-IDX_HOT_MEM_LIMIT=3g
+IDX_MASTER_HEAP=1g
+IDX_MASTER_MEM_LIMIT=2g
+IDX_HOT_HEAP=3g
+IDX_HOT_MEM_LIMIT=6g
 IDX_HOT_CPU_SHARES=2048
-IDX_WARM_HEAP=1g
-IDX_WARM_MEM_LIMIT=2g
-IDX_COLD_HEAP=768m
-IDX_COLD_MEM_LIMIT=1536m
-IDX_INGEST_HEAP=512m
-IDX_INGEST_MEM_LIMIT=1g
+IDX_WARM_HEAP=2g
+IDX_WARM_MEM_LIMIT=4g
+IDX_COLD_HEAP=1g
+IDX_COLD_MEM_LIMIT=2g
+IDX_INGEST_HEAP=1g
+IDX_INGEST_MEM_LIMIT=2g
 IDX_INGEST_CPU_SHARES=1536
-IDX_COORD_HEAP=512m
-IDX_COORD_MEM_LIMIT=1g
-MANAGER_MEM_LIMIT=1536m
-DASHBOARD_MEM_LIMIT=1536m
-# optional modules
-#IDX_ML_HEAP=1g
-#IDX_ML_MEM_LIMIT=2g
-#RUSTFS_MEM_LIMIT=1g
+IDX_COORD_HEAP=1g
+IDX_COORD_MEM_LIMIT=2g
+IDX_ML_HEAP=2g
+IDX_ML_MEM_LIMIT=3g
+MANAGER_MEM_LIMIT=2g
+DASHBOARD_MEM_LIMIT=2g
 EOF
 chmod 600 .env
 
@@ -97,7 +95,11 @@ sed -e "s|REPLACE_WITH_ADMIN_HASH|$ADMIN_HASH|" \
 sed -e "s|REPLACE_WITH_API_PASSWORD|$API_PASSWORD|" \
     config/templates/wazuh.yml.tpl > config/wazuh_dashboard/wazuh.yml
 
+# The master config also carries the optional SOC integration keys; they are
+# empty until './wazuh-deploy.sh soc enable' generates them.
 sed -e "s|REPLACE_WITH_CLUSTER_KEY|$CLUSTER_KEY|" \
+    -e "s|REPLACE_WITH_IRIS_API_KEY|${IRIS_API_KEY:-unset}|" \
+    -e "s|REPLACE_WITH_MISP_API_KEY|${MISP_API_KEY:-unset}|" \
     config/templates/wazuh_manager.conf.tpl > config/wazuh_cluster/wazuh_manager.conf
 for i in 1 2 3 4; do
   sed -e "s|REPLACE_WITH_CLUSTER_KEY|$CLUSTER_KEY|" \

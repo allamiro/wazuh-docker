@@ -52,6 +52,8 @@ plugins.security.nodes_dn:
   - "CN=warm2.indexer"
   - "CN=warm3.indexer"
   - "CN=cold1.indexer"
+  - "CN=cold2.indexer"
+  - "CN=cold3.indexer"
   - "CN=ingest1.indexer"
   - "CN=ingest2.indexer"
   - "CN=coord1.indexer"

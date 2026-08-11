@@ -41,6 +41,7 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 
 | Mode | Walkthrough |
 |---|---|
+| **First time? Start here** | [docs/QUICKSTART-AIRGAP.md](docs/QUICKSTART-AIRGAP.md) |
 | Connected (Docker or VM) | [docs/CONNECTED.md](docs/CONNECTED.md) |
 | Air-gapped (bundle/import) | [docs/AIRGAP.md](docs/AIRGAP.md) |
 | Docker specifics | [docs/DOCKER.md](docs/DOCKER.md) |
