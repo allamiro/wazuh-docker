@@ -1,19 +1,27 @@
+# Wazuh multi-node stack for air-gapped deployment - enterprise topology
+# Host: single 32 GB RAM server. See DEPLOYMENT-GUIDE.md for the memory budget.
+#
+# Indexer cluster (16 nodes):
+#   master1-3.indexer   dedicated cluster managers (quorum of 3)
+#   hot1-3.indexer      hot-tier data nodes   (node.attr.temp=hot)
+#   warm1-3.indexer     warm-tier data nodes  (node.attr.temp=warm)
+#   cold1-3.indexer     cold-tier data nodes  (node.attr.temp=cold)
+#   ingest1-2.indexer   dedicated ingest nodes (Filebeat writes here)
+#   coord1-2.indexer    dedicated coordinating nodes (dashboard queries here)
+# Wazuh server cluster: wazuh.master + wazuh.worker1-4
+#   (the Wazuh cluster protocol allows exactly ONE master node)
+#
+# Before first start you MUST run:
+#   ./generate-certs.sh          (TLS certificates signed by the external CA)
+#   ./generate-credentials.sh    (passwords, bcrypt hashes, cluster key)
+#
 # Wazuh App Copyright (C) 2017, Wazuh Inc. (License GPLv2)
 services:
   wazuh.master:
-    image: wazuh/wazuh-manager:5.1.0
+    image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.master
-    container_name: multi-node-wazuh.master
+    container_name: wazuh.master
     restart: always
-    depends_on:
-      wazuh1.indexer:
-        condition: service_healthy
-    healthcheck:
-      test: [ "CMD-SHELL", "/var/wazuh-manager/bin/wazuh-manager-control status 2>/dev/null | grep -q 'not running' && exit 1 || exit 0" ]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
     ulimits:
       memlock:
         soft: -1
@@ -21,39 +29,52 @@ services:
       nofile:
         soft: 655360
         hard: 655360
+    deploy:
+      resources:
+        limits:
+          memory: ${MANAGER_MEM_LIMIT:-1536m}
     ports:
-      - "1515:1515"
-      - "514:514/udp"
-      - "55000:55000"
+      - "127.0.0.1:55000:55000"   # Wazuh API - localhost only, dashboard reaches it internally
     environment:
-      - WAZUH_INDEXER_HOSTS=wazuh1.indexer:9200,wazuh2.indexer:9200,wazuh3.indexer:9200
-      - WAZUH_NODE_NAME=master
-      - WAZUH_NODE_TYPE=master
-      - WAZUH_CLUSTER_BIND_ADDR=0.0.0.0
-      - WAZUH_CLUSTER_NODES=wazuh.master
-      - INDEXER_USERNAME=wazuh-manager
-      - INDEXER_PASSWORD=wazuh-manager
+      - INDEXER_URL="https://ingest1.indexer:9200","https://ingest2.indexer:9200"
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?run ./generate-credentials.sh first}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=${API_PASSWORD:?run ./generate-credentials.sh first}
     volumes:
-      - master-wazuh-api-configuration:/var/wazuh-manager/api/configuration
-      - master-wazuh-etc:/var/wazuh-manager/etc
-      - master-wazuh-logs:/var/wazuh-manager/logs
-      - master-wazuh-queue:/var/wazuh-manager/queue
-      - master-wazuh-var-multigroups:/var/wazuh-manager/var/multigroups
-      - ./config/root-ca/certs/root-ca.pem:/var/wazuh-manager/etc/certs/root-ca.pem
-      - ./config/wazuh_master/certs/wazuh.master.pem:/var/wazuh-manager/etc/certs/manager.pem
-      - ./config/wazuh_master/certs/wazuh.master-key.pem:/var/wazuh-manager/etc/certs/manager-key.pem
-
-  wazuh.worker:
-    image: wazuh/wazuh-manager:5.1.0
-    hostname: wazuh.worker
-    container_name: multi-node-wazuh.worker
+      - master-wazuh-api-configuration:/var/ossec/api/configuration
+      - master-wazuh-etc:/var/ossec/etc
+      - master-wazuh-logs:/var/ossec/logs
+      - master-wazuh-queue:/var/ossec/queue
+      - master-wazuh-var-multigroups:/var/ossec/var/multigroups
+      - master-wazuh-integrations:/var/ossec/integrations
+      - master-wazuh-active-response:/var/ossec/active-response/bin
+      - master-wazuh-agentless:/var/ossec/agentless
+      - master-wazuh-wodles:/var/ossec/wodles
+      - master-filebeat-etc:/etc/filebeat
+      - master-filebeat-var:/var/lib/filebeat
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master.pem:/etc/ssl/filebeat.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master-key.pem:/etc/ssl/filebeat.key
+      - ./config/wazuh_cluster/wazuh_manager.conf:/wazuh-config-mount/etc/ossec.conf
+      - ./config/wazuh_cluster/authd.pass:/wazuh-config-mount/etc/authd.pass
+      # CA-signed cert for agent enrollment (authd, port 1515)
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master.pem:/wazuh-config-mount/etc/sslmanager.cert
+      - ./config/wazuh_indexer_ssl_certs/wazuh.master-key.pem:/wazuh-config-mount/etc/sslmanager.key
+    depends_on:
+      ingest1.indexer:
+        condition: service_healthy
+    networks:
+      - siem
+  wazuh.worker1:
+    image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
+    hostname: wazuh.worker1
+    container_name: wazuh.worker1
     restart: always
-    healthcheck:
-      test: [ "CMD-SHELL", "/var/wazuh-manager/bin/wazuh-manager-control status 2>/dev/null | grep -v apid | grep -q 'not running' && exit 1 || exit 0" ]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
     ulimits:
       memlock:
         soft: -1
@@ -61,84 +82,703 @@ services:
       nofile:
         soft: 655360
         hard: 655360
+    deploy:
+      resources:
+        limits:
+          memory: ${MANAGER_MEM_LIMIT:-1536m}
+    environment:
+      - INDEXER_URL="https://ingest1.indexer:9200","https://ingest2.indexer:9200"
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?run ./generate-credentials.sh first}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+    volumes:
+      - worker1-wazuh-api-configuration:/var/ossec/api/configuration
+      - worker1-wazuh-etc:/var/ossec/etc
+      - worker1-wazuh-logs:/var/ossec/logs
+      - worker1-wazuh-queue:/var/ossec/queue
+      - worker1-wazuh-var-multigroups:/var/ossec/var/multigroups
+      - worker1-wazuh-integrations:/var/ossec/integrations
+      - worker1-wazuh-active-response:/var/ossec/active-response/bin
+      - worker1-wazuh-agentless:/var/ossec/agentless
+      - worker1-wazuh-wodles:/var/ossec/wodles
+      - worker1-filebeat-etc:/etc/filebeat
+      - worker1-filebeat-var:/var/lib/filebeat
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker1.pem:/etc/ssl/filebeat.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker1-key.pem:/etc/ssl/filebeat.key
+      - ./config/wazuh_cluster/wazuh_worker1.conf:/wazuh-config-mount/etc/ossec.conf
     depends_on:
       wazuh.master:
-        condition: service_healthy
-    environment:
-      - WAZUH_INDEXER_HOSTS=wazuh1.indexer:9200,wazuh2.indexer:9200,wazuh3.indexer:9200
-      - WAZUH_NODE_NAME=worker01
-      - WAZUH_NODE_TYPE=worker
-      - WAZUH_CLUSTER_BIND_ADDR=0.0.0.0
-      - WAZUH_CLUSTER_NODES=wazuh.master
-      - INDEXER_USERNAME=wazuh-manager
-      - INDEXER_PASSWORD=wazuh-manager
-    volumes:
-      - worker-wazuh-api-configuration:/var/wazuh-manager/api/configuration
-      - worker-wazuh-etc:/var/wazuh-manager/etc
-      - worker-wazuh-logs:/var/wazuh-manager/logs
-      - worker-wazuh-queue:/var/wazuh-manager/queue
-      - worker-wazuh-var-multigroups:/var/wazuh-manager/var/multigroups
-      - ./config/root-ca/certs/root-ca.pem:/var/wazuh-manager/etc/certs/root-ca.pem
-      - ./config/wazuh_worker/certs/wazuh.worker.pem:/var/wazuh-manager/etc/certs/manager.pem
-      - ./config/wazuh_worker/certs/wazuh.worker-key.pem:/var/wazuh-manager/etc/certs/manager-key.pem
-
-  wazuh1.indexer:
-    image: wazuh/wazuh-indexer:5.1.0
-    hostname: wazuh1.indexer
-    container_name: multi-node-wazuh1.indexer
+        condition: service_started
+    networks:
+      - siem
+  wazuh.worker2:
+    image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
+    hostname: wazuh.worker2
+    container_name: wazuh.worker2
     restart: always
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 655360
+        hard: 655360
+    deploy:
+      resources:
+        limits:
+          memory: ${MANAGER_MEM_LIMIT:-1536m}
+    environment:
+      - INDEXER_URL="https://ingest1.indexer:9200","https://ingest2.indexer:9200"
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?run ./generate-credentials.sh first}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+    volumes:
+      - worker2-wazuh-api-configuration:/var/ossec/api/configuration
+      - worker2-wazuh-etc:/var/ossec/etc
+      - worker2-wazuh-logs:/var/ossec/logs
+      - worker2-wazuh-queue:/var/ossec/queue
+      - worker2-wazuh-var-multigroups:/var/ossec/var/multigroups
+      - worker2-wazuh-integrations:/var/ossec/integrations
+      - worker2-wazuh-active-response:/var/ossec/active-response/bin
+      - worker2-wazuh-agentless:/var/ossec/agentless
+      - worker2-wazuh-wodles:/var/ossec/wodles
+      - worker2-filebeat-etc:/etc/filebeat
+      - worker2-filebeat-var:/var/lib/filebeat
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker2.pem:/etc/ssl/filebeat.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker2-key.pem:/etc/ssl/filebeat.key
+      - ./config/wazuh_cluster/wazuh_worker2.conf:/wazuh-config-mount/etc/ossec.conf
+    depends_on:
+      wazuh.master:
+        condition: service_started
+    networks:
+      - siem
+  wazuh.worker3:
+    image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
+    hostname: wazuh.worker3
+    container_name: wazuh.worker3
+    restart: always
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 655360
+        hard: 655360
+    deploy:
+      resources:
+        limits:
+          memory: ${MANAGER_MEM_LIMIT:-1536m}
+    environment:
+      - INDEXER_URL="https://ingest1.indexer:9200","https://ingest2.indexer:9200"
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?run ./generate-credentials.sh first}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+    volumes:
+      - worker3-wazuh-api-configuration:/var/ossec/api/configuration
+      - worker3-wazuh-etc:/var/ossec/etc
+      - worker3-wazuh-logs:/var/ossec/logs
+      - worker3-wazuh-queue:/var/ossec/queue
+      - worker3-wazuh-var-multigroups:/var/ossec/var/multigroups
+      - worker3-wazuh-integrations:/var/ossec/integrations
+      - worker3-wazuh-active-response:/var/ossec/active-response/bin
+      - worker3-wazuh-agentless:/var/ossec/agentless
+      - worker3-wazuh-wodles:/var/ossec/wodles
+      - worker3-filebeat-etc:/etc/filebeat
+      - worker3-filebeat-var:/var/lib/filebeat
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker3.pem:/etc/ssl/filebeat.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker3-key.pem:/etc/ssl/filebeat.key
+      - ./config/wazuh_cluster/wazuh_worker3.conf:/wazuh-config-mount/etc/ossec.conf
+    depends_on:
+      wazuh.master:
+        condition: service_started
+    networks:
+      - siem
+  wazuh.worker4:
+    image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.14.7}
+    hostname: wazuh.worker4
+    container_name: wazuh.worker4
+    restart: always
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 655360
+        hard: 655360
+    deploy:
+      resources:
+        limits:
+          memory: ${MANAGER_MEM_LIMIT:-1536m}
+    environment:
+      - INDEXER_URL="https://ingest1.indexer:9200","https://ingest2.indexer:9200"
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${INDEXER_PASSWORD:?run ./generate-credentials.sh first}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat.key
+    volumes:
+      - worker4-wazuh-api-configuration:/var/ossec/api/configuration
+      - worker4-wazuh-etc:/var/ossec/etc
+      - worker4-wazuh-logs:/var/ossec/logs
+      - worker4-wazuh-queue:/var/ossec/queue
+      - worker4-wazuh-var-multigroups:/var/ossec/var/multigroups
+      - worker4-wazuh-integrations:/var/ossec/integrations
+      - worker4-wazuh-active-response:/var/ossec/active-response/bin
+      - worker4-wazuh-agentless:/var/ossec/agentless
+      - worker4-wazuh-wodles:/var/ossec/wodles
+      - worker4-filebeat-etc:/etc/filebeat
+      - worker4-filebeat-var:/var/lib/filebeat
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker4.pem:/etc/ssl/filebeat.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.worker4-key.pem:/etc/ssl/filebeat.key
+      - ./config/wazuh_cluster/wazuh_worker4.conf:/wazuh-config-mount/etc/ossec.conf
+    depends_on:
+      wazuh.master:
+        condition: service_started
+    networks:
+      - siem
+  # ---------------------------------------------------------------------------
+  # Indexer cluster
+  # ---------------------------------------------------------------------------
+  master1.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: master1.indexer
+    container_name: master1.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP:-512m} -Xmx${IDX_MASTER_HEAP:-512m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_MASTER_MEM_LIMIT:-1g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-master1:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/master1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/master1.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/master1.indexer.pem:/usr/share/wazuh-indexer/config/certs/master1.indexer.pem
+      - ./config/wazuh_indexer_ssl_certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
+      - ./config/wazuh_indexer_ssl_certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
+      - ./config/wazuh_indexer/master1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  master2.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: master2.indexer
+    container_name: master2.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP:-512m} -Xmx${IDX_MASTER_HEAP:-512m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_MASTER_MEM_LIMIT:-1g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-master2:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/master2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/master2.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/master2.indexer.pem:/usr/share/wazuh-indexer/config/certs/master2.indexer.pem
+      - ./config/wazuh_indexer/master2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  master3.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: master3.indexer
+    container_name: master3.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_MASTER_HEAP:-512m} -Xmx${IDX_MASTER_HEAP:-512m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_MASTER_MEM_LIMIT:-1g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-master3:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/master3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/master3.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/master3.indexer.pem:/usr/share/wazuh-indexer/config/certs/master3.indexer.pem
+      - ./config/wazuh_indexer/master3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  hot1.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: hot1.indexer
+    container_name: hot1.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP:-1536m} -Xmx${IDX_HOT_HEAP:-1536m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_HOT_MEM_LIMIT:-3g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-hot1:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/hot1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/hot1.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/hot1.indexer.pem:/usr/share/wazuh-indexer/config/certs/hot1.indexer.pem
+      - ./config/wazuh_indexer/hot1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  hot2.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: hot2.indexer
+    container_name: hot2.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP:-1536m} -Xmx${IDX_HOT_HEAP:-1536m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_HOT_MEM_LIMIT:-3g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-hot2:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/hot2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/hot2.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/hot2.indexer.pem:/usr/share/wazuh-indexer/config/certs/hot2.indexer.pem
+      - ./config/wazuh_indexer/hot2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  hot3.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: hot3.indexer
+    container_name: hot3.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_HOT_HEAP:-1536m} -Xmx${IDX_HOT_HEAP:-1536m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_HOT_MEM_LIMIT:-3g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-hot3:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/hot3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/hot3.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/hot3.indexer.pem:/usr/share/wazuh-indexer/config/certs/hot3.indexer.pem
+      - ./config/wazuh_indexer/hot3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  warm1.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: warm1.indexer
+    container_name: warm1.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP:-1g} -Xmx${IDX_WARM_HEAP:-1g}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_WARM_MEM_LIMIT:-2g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-warm1:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/warm1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/warm1.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/warm1.indexer.pem:/usr/share/wazuh-indexer/config/certs/warm1.indexer.pem
+      - ./config/wazuh_indexer/warm1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  warm2.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: warm2.indexer
+    container_name: warm2.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP:-1g} -Xmx${IDX_WARM_HEAP:-1g}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_WARM_MEM_LIMIT:-2g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-warm2:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/warm2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/warm2.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/warm2.indexer.pem:/usr/share/wazuh-indexer/config/certs/warm2.indexer.pem
+      - ./config/wazuh_indexer/warm2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  warm3.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: warm3.indexer
+    container_name: warm3.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_WARM_HEAP:-1g} -Xmx${IDX_WARM_HEAP:-1g}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_WARM_MEM_LIMIT:-2g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-warm3:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/warm3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/warm3.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/warm3.indexer.pem:/usr/share/wazuh-indexer/config/certs/warm3.indexer.pem
+      - ./config/wazuh_indexer/warm3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  cold1.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: cold1.indexer
+    container_name: cold1.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP:-768m} -Xmx${IDX_COLD_HEAP:-768m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_COLD_MEM_LIMIT:-1536m}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-cold1:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/cold1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold1.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/cold1.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold1.indexer.pem
+      - ./config/wazuh_indexer/cold1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  cold2.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: cold2.indexer
+    container_name: cold2.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP:-768m} -Xmx${IDX_COLD_HEAP:-768m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_COLD_MEM_LIMIT:-1536m}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-cold2:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/cold2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/cold2.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.pem
+      - ./config/wazuh_indexer/cold2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  cold3.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: cold3.indexer
+    container_name: cold3.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP:-768m} -Xmx${IDX_COLD_HEAP:-768m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_COLD_MEM_LIMIT:-1536m}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-cold3:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/cold3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/cold3.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.pem
+      - ./config/wazuh_indexer/cold3.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  ingest1.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: ingest1.indexer
+    container_name: ingest1.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_INGEST_HEAP:-512m} -Xmx${IDX_INGEST_HEAP:-512m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_INGEST_MEM_LIMIT:-1g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-ingest1:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/ingest1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/ingest1.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/ingest1.indexer.pem:/usr/share/wazuh-indexer/config/certs/ingest1.indexer.pem
+      - ./config/wazuh_indexer/ingest1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  ingest2.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: ingest2.indexer
+    container_name: ingest2.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_INGEST_HEAP:-512m} -Xmx${IDX_INGEST_HEAP:-512m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_INGEST_MEM_LIMIT:-1g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    volumes:
+      - indexer-data-ingest2:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/ingest2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/ingest2.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/ingest2.indexer.pem:/usr/share/wazuh-indexer/config/certs/ingest2.indexer.pem
+      - ./config/wazuh_indexer/ingest2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  coord1.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: coord1.indexer
+    container_name: coord1.indexer
+    restart: always
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COORD_HEAP:-512m} -Xmx${IDX_COORD_HEAP:-512m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_COORD_MEM_LIMIT:-1g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
     ports:
-      - "9200:9200"
-    environment:
-      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
-      - bootstrap.memory_lock=true
-      - network.host=0.0.0.0
-      - node.name=wazuh1.indexer
-      - cluster.initial_cluster_manager_nodes=wazuh1.indexer,wazuh2.indexer,wazuh3.indexer
-      - discovery.seed_hosts=wazuh1.indexer,wazuh2.indexer,wazuh3.indexer
-      - node.max_local_storage_nodes=3
-      - plugins.security.allow_default_init_securityindex=true
-      - NODES_DN=CN=wazuh1.indexer,OU=Wazuh,O=Wazuh,L=California,C=US;CN=wazuh2.indexer,OU=Wazuh,O=Wazuh,L=California,C=US;CN=wazuh3.indexer,OU=Wazuh,O=Wazuh,L=California,C=US
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
+      - "127.0.0.1:9200:9200"   # admin access to the REST API - localhost only
     healthcheck:
       test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 60s
+      retries: 10
+      start_period: 120s
     volumes:
-      - wazuh-indexer-data-1:/var/lib/wazuh-indexer
-      - ./config/root-ca/certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
-      - ./config/wazuh1_indexer/certs/wazuh1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/indexer-key.pem
-      - ./config/wazuh1_indexer/certs/wazuh1.indexer.pem:/usr/share/wazuh-indexer/config/certs/indexer.pem
-      - ./config/wazuh1_indexer/certs/admin.pem:/usr/share/wazuh-indexer/config/certs/admin.pem
-      - ./config/wazuh1_indexer/certs/admin-key.pem:/usr/share/wazuh-indexer/config/certs/admin-key.pem
-
-  wazuh2.indexer:
-    image: wazuh/wazuh-indexer:5.1.0
-    hostname: wazuh2.indexer
-    container_name: multi-node-wazuh2.indexer
+      - indexer-data-coord1:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/coord1.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/coord1.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/coord1.indexer.pem:/usr/share/wazuh-indexer/config/certs/coord1.indexer.pem
+      - ./config/wazuh_indexer/coord1.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
+  coord2.indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
+    hostname: coord2.indexer
+    container_name: coord2.indexer
     restart: always
-    entrypoint: >
-      /bin/sh -c " echo 'Waiting for wazuh1.indexer...'; sleep 5; until getent hosts wazuh1.indexer; do sleep 2; done; /entrypoint.sh opensearch"
-    depends_on:
-      - wazuh1.indexer
     environment:
-      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
-      - bootstrap.memory_lock=true
-      - network.host=0.0.0.0
-      - node.name=wazuh2.indexer
-      - cluster.initial_cluster_manager_nodes=wazuh1.indexer,wazuh2.indexer,wazuh3.indexer
-      - discovery.seed_hosts=wazuh1.indexer,wazuh2.indexer,wazuh3.indexer
-      - node.max_local_storage_nodes=3
-      - plugins.security.allow_default_init_securityindex=true
-      - NODES_DN=CN=wazuh1.indexer,OU=Wazuh,O=Wazuh,L=California,C=US;CN=wazuh2.indexer,OU=Wazuh,O=Wazuh,L=California,C=US;CN=wazuh3.indexer,OU=Wazuh,O=Wazuh,L=California,C=US
+      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COORD_HEAP:-512m} -Xmx${IDX_COORD_HEAP:-512m}"
+      - "bootstrap.memory_lock=true"
+    deploy:
+      resources:
+        limits:
+          memory: ${IDX_COORD_MEM_LIMIT:-1g}
     ulimits:
       memlock:
         soft: -1
@@ -150,100 +790,83 @@ services:
       test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 60s
+      retries: 10
+      start_period: 120s
     volumes:
-      - wazuh-indexer-data-2:/var/lib/wazuh-indexer
-      - ./config/root-ca/certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
-      - ./config/wazuh2_indexer/certs/wazuh2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/indexer-key.pem
-      - ./config/wazuh2_indexer/certs/wazuh2.indexer.pem:/usr/share/wazuh-indexer/config/certs/indexer.pem
-
-  wazuh3.indexer:
-    image: wazuh/wazuh-indexer:5.1.0
-    hostname: wazuh3.indexer
-    container_name: multi-node-wazuh3.indexer
-    restart: always
-    entrypoint: >
-      /bin/sh -c " echo 'Waiting for wazuh1.indexer...'; sleep 5;until getent hosts wazuh1.indexer; do sleep 2; done; /entrypoint.sh opensearch"
-    depends_on:
-      - wazuh1.indexer
-    environment:
-      - OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
-      - bootstrap.memory_lock=true
-      - network.host=0.0.0.0
-      - node.name=wazuh3.indexer
-      - cluster.initial_cluster_manager_nodes=wazuh1.indexer,wazuh2.indexer,wazuh3.indexer
-      - discovery.seed_hosts=wazuh1.indexer,wazuh2.indexer,wazuh3.indexer
-      - node.max_local_storage_nodes=3
-      - plugins.security.allow_default_init_securityindex=true
-      - NODES_DN=CN=wazuh1.indexer,OU=Wazuh,O=Wazuh,L=California,C=US;CN=wazuh2.indexer,OU=Wazuh,O=Wazuh,L=California,C=US;CN=wazuh3.indexer,OU=Wazuh,O=Wazuh,L=California,C=US
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    healthcheck:
-      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
-    volumes:
-      - wazuh-indexer-data-3:/var/lib/wazuh-indexer
-      - ./config/root-ca/certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
-      - ./config/wazuh3_indexer/certs/wazuh3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/indexer-key.pem
-      - ./config/wazuh3_indexer/certs/wazuh3.indexer.pem:/usr/share/wazuh-indexer/config/certs/indexer.pem
-
+      - indexer-data-coord2:/var/lib/wazuh-indexer
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
+      - ./config/wazuh_indexer_ssl_certs/coord2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/coord2.indexer.key
+      - ./config/wazuh_indexer_ssl_certs/coord2.indexer.pem:/usr/share/wazuh-indexer/config/certs/coord2.indexer.pem
+      - ./config/wazuh_indexer/coord2.indexer.yml:/usr/share/wazuh-indexer/config/opensearch.yml
+      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
+    networks:
+      - siem
   wazuh.dashboard:
-    image: wazuh/wazuh-dashboard:5.1.0
+    image: wazuh/wazuh-dashboard:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.dashboard
-    container_name: multi-node-wazuh.dashboard
+    container_name: wazuh.dashboard
     restart: always
-    healthcheck:
-      test: [ "CMD", "curl", "-k", "-s", "-o", "/dev/null", "https://localhost:5601/login" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
     ports:
-      - 443:5601
+      - "443:5601"   # https://siem.local.domain
+    deploy:
+      resources:
+        limits:
+          memory: ${DASHBOARD_MEM_LIMIT:-1536m}
     environment:
-      - SERVER_PORT=5601
-      - SERVER_HOST=0.0.0.0
-      - OPENSEARCH_HOSTS=["https://wazuh1.indexer:9200","https://wazuh2.indexer:9200","https://wazuh3.indexer:9200"]
-      - WAZUH_API_URL=https://wazuh.master
+      - OPENSEARCH_HOSTS="https://coord1.indexer:9200"
+      - WAZUH_API_URL="https://wazuh.master"
+      - API_USERNAME=wazuh-wui
+      - API_PASSWORD=${API_PASSWORD:?run ./generate-credentials.sh first}
       - DASHBOARD_USERNAME=kibanaserver
-      - DASHBOARD_PASSWORD=kibanaserver
-      - SERVER_SSL_CERTIFICATE=/usr/share/wazuh-dashboard/config/certs/wazuh-dashboard.pem
-      - SERVER_SSL_KEY=/usr/share/wazuh-dashboard/config/certs/wazuh-dashboard-key.pem
-      - OPENSEARCH_SSL_CERTIFICATE_AUTHORITIES=/usr/share/wazuh-dashboard/config/certs/root-ca.pem
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:?run ./generate-credentials.sh first}
     volumes:
-      - ./config/wazuh_dashboard/certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/config/certs/wazuh-dashboard.pem
-      - ./config/wazuh_dashboard/certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/config/certs/wazuh-dashboard-key.pem
-      - ./config/root-ca/certs/root-ca.pem:/usr/share/wazuh-dashboard/config/certs/root-ca.pem
-      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/config
+      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard.pem
+      - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-dashboard/certs/root-ca.pem
+      - ./config/wazuh_dashboard/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+      - ./config/wazuh_dashboard/wazuh.yml:/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml
+      - wazuh-dashboard-config:/usr/share/wazuh-dashboard/data/wazuh/config
       - wazuh-dashboard-custom:/usr/share/wazuh-dashboard/plugins/wazuh/public/assets/custom
     depends_on:
-      wazuh1.indexer:
+      coord1.indexer:
         condition: service_healthy
       wazuh.master:
-        condition: service_healthy
+        condition: service_started
+    networks:
+      - siem
 
+  # TCP load balancer: single entry point (siem.local.domain) for agent
+  # traffic - events (1514) are balanced across the Wazuh server cluster,
+  # enrollment (1515) always goes to the master.
   nginx:
-    image: nginx:stable
+    image: nginx:${NGINX_VERSION:-1.29-alpine}
     hostname: nginx
-    container_name: multi-node-nginx
+    container_name: siem-nginx
     restart: always
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 256m
     ports:
       - "1514:1514"
+      - "1515:1515"
     depends_on:
       - wazuh.master
-      - wazuh.worker
-      - wazuh.dashboard
+      - wazuh.worker1
+      - wazuh.worker2
+      - wazuh.worker3
+      - wazuh.worker4
     volumes:
       - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - siem
+
+networks:
+  siem:
+    name: siem
+    driver: bridge
 
 volumes:
   master-wazuh-api-configuration:
@@ -251,13 +874,71 @@ volumes:
   master-wazuh-logs:
   master-wazuh-queue:
   master-wazuh-var-multigroups:
-  worker-wazuh-api-configuration:
-  worker-wazuh-etc:
-  worker-wazuh-logs:
-  worker-wazuh-queue:
-  worker-wazuh-var-multigroups:
-  wazuh-indexer-data-1:
-  wazuh-indexer-data-2:
-  wazuh-indexer-data-3:
+  master-wazuh-integrations:
+  master-wazuh-active-response:
+  master-wazuh-agentless:
+  master-wazuh-wodles:
+  master-filebeat-etc:
+  master-filebeat-var:
+  worker1-wazuh-api-configuration:
+  worker1-wazuh-etc:
+  worker1-wazuh-logs:
+  worker1-wazuh-queue:
+  worker1-wazuh-var-multigroups:
+  worker1-wazuh-integrations:
+  worker1-wazuh-active-response:
+  worker1-wazuh-agentless:
+  worker1-wazuh-wodles:
+  worker1-filebeat-etc:
+  worker1-filebeat-var:
+  worker2-wazuh-api-configuration:
+  worker2-wazuh-etc:
+  worker2-wazuh-logs:
+  worker2-wazuh-queue:
+  worker2-wazuh-var-multigroups:
+  worker2-wazuh-integrations:
+  worker2-wazuh-active-response:
+  worker2-wazuh-agentless:
+  worker2-wazuh-wodles:
+  worker2-filebeat-etc:
+  worker2-filebeat-var:
+  worker3-wazuh-api-configuration:
+  worker3-wazuh-etc:
+  worker3-wazuh-logs:
+  worker3-wazuh-queue:
+  worker3-wazuh-var-multigroups:
+  worker3-wazuh-integrations:
+  worker3-wazuh-active-response:
+  worker3-wazuh-agentless:
+  worker3-wazuh-wodles:
+  worker3-filebeat-etc:
+  worker3-filebeat-var:
+  worker4-wazuh-api-configuration:
+  worker4-wazuh-etc:
+  worker4-wazuh-logs:
+  worker4-wazuh-queue:
+  worker4-wazuh-var-multigroups:
+  worker4-wazuh-integrations:
+  worker4-wazuh-active-response:
+  worker4-wazuh-agentless:
+  worker4-wazuh-wodles:
+  worker4-filebeat-etc:
+  worker4-filebeat-var:
+  indexer-data-master1:
+  indexer-data-master2:
+  indexer-data-master3:
+  indexer-data-hot1:
+  indexer-data-hot2:
+  indexer-data-hot3:
+  indexer-data-warm1:
+  indexer-data-warm2:
+  indexer-data-warm3:
+  indexer-data-cold1:
+  indexer-data-cold2:
+  indexer-data-cold3:
+  indexer-data-ingest1:
+  indexer-data-ingest2:
+  indexer-data-coord1:
+  indexer-data-coord2:
   wazuh-dashboard-config:
   wazuh-dashboard-custom:

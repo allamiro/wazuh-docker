@@ -1,58 +1,31 @@
-# Wazuh containers for Docker
+# Wazuh multi-node — air-gapped deployment (`airgp` branch)
 
-[![Slack](https://img.shields.io/badge/slack-join-blue.svg)](https://wazuh.com/community/join-us-on-slack/)
-[![Email](https://img.shields.io/badge/email-join-blue.svg)](https://groups.google.com/forum/#!forum/wazuh)
+This branch is a stripped-down fork of [wazuh/wazuh-docker](https://github.com/wazuh/wazuh-docker)
+containing **only** a hardened multi-node stack designed for **air-gapped**
+environments, published at **`https://siem.local.domain`**.
 
-## Description
+Everything else from the upstream repository (single-node, image build
+tooling, upstream docs) has been removed on purpose.
 
-The `wazuh/wazuh-docker` repository provides resources to deploy the Wazuh cybersecurity platform using Docker containers. This setup enables easy installation and orchestration of the full Wazuh stack, including the Wazuh manager, dashboard (based on OpenSearch Dashboards), and OpenSearch for indexing and search.
+| | |
+|---|---|
+| Wazuh version | 4.14.7 (latest published stable) |
+| Topology | 2 Wazuh servers (master + worker), 4 indexer nodes (3× cluster_manager+data+ingest, 1 dedicated coordinating), dashboard, nginx TCP load balancer |
+| TLS | Every certificate is signed by an external root CA (step-ca container or openssl) — nothing is self-signed per-service |
+| Sizing | Tuned for a single 32 GB RAM server |
 
-## Capabilities
+## Quick start
 
-- Full deployment of the Wazuh stack using Docker.
-- `docker compose` support for orchestration.
-- Scalable architecture with multi-node support.
-- Data persistence through configurable volumes.
-- Ready-to-use configurations for production or testing environments.
+```bash
+cd multi-node
+./generate-certs.sh          # external CA + 8 leaf certificates
+./generate-credentials.sh    # passwords, bcrypt hashes, cluster key
+docker compose up -d
+```
 
-## Branch Convention
+Then browse to `https://siem.local.domain` (admin / password printed by
+`generate-credentials.sh`).
 
-- `main`: Developing and testing of new features.
-- `X.Y.Z`: Version-specific branches (e.g., `5.1.0`, `4.14.0`, etc.).
-
-## Documentation
-
-Official documentation is available at:
-
-[https://documentation.wazuh.com/current/deployment-options/docker/index.html](https://documentation.wazuh.com/current/deployment-options/docker/index.html)
-
-You can also explore internal documentation in the [`docs`](https://github.com/wazuh/wazuh-docker/tree/main/docs) folder of this repository.
-
-## Get Involved
-
-- **Fork the repository** and create your own branches to add features or fix bugs.
-- **Open issues** to report bugs or request features.
-- **Submit pull requests** following the contributing guidelines.
-- Participate in [discussions](https://github.com/wazuh/wazuh-docker/discussions) if available.
-
-## Authors / Maintainers
-
-These Docker containers are based on:
-
-*  "deviantony" dockerfiles which can be found at [https://github.com/deviantony/docker-elk](https://github.com/deviantony/docker-elk)
-*  "xetus-oss" dockerfiles, which can be found at [https://github.com/xetus-oss/docker-ossec-server](https://github.com/xetus-oss/docker-ossec-server)
-
-This project is maintained by the [Wazuh](https://wazuh.com) team, with active contributions from the community.
-
-See the full list of contributors at:
-[https://github.com/wazuh/wazuh-docker/graphs/contributors](https://github.com/wazuh/wazuh-docker/graphs/contributors)
-
-We thank them and everyone else who has contributed to this project.
-
-## License and copyright
-
-Wazuh Docker Copyright (C) 2017, Wazuh Inc. (License GPLv2)
-
-## Web references
-
-[Wazuh website](http://wazuh.com)
+**Read [DEPLOYMENT-GUIDE.md](DEPLOYMENT-GUIDE.md) before deploying for real** —
+it covers the air-gap image transfer, the certificate inventory, DNS,
+memory budget, agent enrollment and operations.

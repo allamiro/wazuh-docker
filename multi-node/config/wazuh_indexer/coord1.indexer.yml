@@ -1,0 +1,66 @@
+# coord1.indexer - dedicated coordinating node (no roles)
+network.host: "0.0.0.0"
+# Advertise the DNS name (matches the cert SANs) instead of the container
+# IP, so transport hostname verification can stay enforced.
+network.publish_host: coord1.indexer
+node.name: coord1.indexer
+node.roles: []
+cluster.name: "wazuh-cluster"
+cluster.initial_cluster_manager_nodes:
+  - master1.indexer
+  - master2.indexer
+  - master3.indexer
+discovery.seed_hosts:
+  - master1.indexer
+  - master2.indexer
+  - master3.indexer
+path.data: /var/lib/wazuh-indexer
+path.logs: /var/log/wazuh-indexer
+plugins.security.ssl.http.pemcert_filepath: ${OPENSEARCH_PATH_CONF}/certs/coord1.indexer.pem
+plugins.security.ssl.http.pemkey_filepath: ${OPENSEARCH_PATH_CONF}/certs/coord1.indexer.key
+plugins.security.ssl.http.pemtrustedcas_filepath: ${OPENSEARCH_PATH_CONF}/certs/root-ca.pem
+plugins.security.ssl.transport.pemcert_filepath: ${OPENSEARCH_PATH_CONF}/certs/coord1.indexer.pem
+plugins.security.ssl.transport.pemkey_filepath: ${OPENSEARCH_PATH_CONF}/certs/coord1.indexer.key
+plugins.security.ssl.transport.pemtrustedcas_filepath: ${OPENSEARCH_PATH_CONF}/certs/root-ca.pem
+plugins.security.ssl.http.enabled: true
+# Certificates carry proper DNS SANs, so transport-layer hostname
+# verification can be enforced (hardening over the upstream default).
+plugins.security.ssl.transport.enforce_hostname_verification: true
+plugins.security.ssl.transport.resolve_hostname: false
+plugins.security.ssl.http.enabled_ciphers:
+  - "TLS_AES_128_GCM_SHA256"
+  - "TLS_AES_256_GCM_SHA384"
+  - "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+  - "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384"
+  - "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+  - "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"
+plugins.security.ssl.http.enabled_protocols:
+  - "TLSv1.3"
+  - "TLSv1.2"
+plugins.security.authcz.admin_dn:
+  - "CN=admin"
+plugins.security.check_snapshot_restore_write_privileges: true
+plugins.security.enable_snapshot_restore_privilege: true
+plugins.security.nodes_dn:
+  - "CN=master1.indexer"
+  - "CN=master2.indexer"
+  - "CN=master3.indexer"
+  - "CN=hot1.indexer"
+  - "CN=hot2.indexer"
+  - "CN=hot3.indexer"
+  - "CN=warm1.indexer"
+  - "CN=warm2.indexer"
+  - "CN=warm3.indexer"
+  - "CN=cold1.indexer"
+  - "CN=cold2.indexer"
+  - "CN=cold3.indexer"
+  - "CN=ingest1.indexer"
+  - "CN=ingest2.indexer"
+  - "CN=coord1.indexer"
+  - "CN=coord2.indexer"
+plugins.security.restapi.roles_enabled:
+  - "all_access"
+  - "security_rest_api_access"
+plugins.security.allow_default_init_securityindex: true
+cluster.routing.allocation.disk.threshold_enabled: false
+compatibility.override_main_response_version: true

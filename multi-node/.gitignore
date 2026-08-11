@@ -1,0 +1,9 @@
+# Secrets and generated material - never commit.
+.env
+config/certs-ca/
+config/wazuh_indexer_ssl_certs/
+config/wazuh_cluster/wazuh_manager.conf
+config/wazuh_cluster/wazuh_worker*.conf
+config/wazuh_cluster/authd.pass
+config/wazuh_indexer/internal_users.yml
+config/wazuh_dashboard/wazuh.yml
