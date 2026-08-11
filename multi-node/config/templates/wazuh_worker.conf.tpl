@@ -1,5 +1,7 @@
 <ossec_config>
   <global>
+    <!-- air-gap: the online CTI update check can only fail here -->
+    <update_check>no</update_check>
     <jsonout_output>yes</jsonout_output>
     <alerts_log>yes</alerts_log>
     <logall>no</logall>

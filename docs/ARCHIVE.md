@@ -58,7 +58,7 @@ truststore (the init wrapper imports `root-ca.pem`) and authenticate with
 ```bash
 ./wazuh-deploy.sh archive enable       # keys, TLS dir, logall_json, profile
 docker compose up -d                   # recreates indexers, starts rustfs + archiver
-docker compose restart wazuh.master    # applies logall_json
+docker compose up -d --force-recreate wazuh.master   # applies logall_json (recreation, not restart)
 ./wazuh-deploy.sh archive init         # buckets, snapshot repo, ISM policy
 ```
 

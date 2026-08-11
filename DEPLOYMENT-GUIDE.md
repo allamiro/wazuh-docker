@@ -627,6 +627,10 @@ under Wazuh monitoring.
 | Filebeat: certificate valid for X, not ingest1.indexer | SAN mismatch — run `./generate-certs.sh verify` and re-issue |
 | agents can't enroll | wrong enrollment password, DNS for `siem.local.domain` missing (section 3), or 1515 blocked |
 | cluster yellow after a tier restart | normal while replicas re-sync |
+| dashboard: `duplicated mapping key` in wazuh.yml | the image entrypoint appends a `hosts:` block unless the file contains the literal id `1513629884013` — keep that id (the shipped template does); delete the duplicate block and recreate the dashboard |
+| dashboard: `Error checking available updates: Service Unavailable` | online CTI check in an air gap — disabled via `<update_check>no</update_check>` in the manager templates (shipped default) |
+| a change under `config/wazuh_cluster/*.conf` doesn't apply | config-mount files copy into the container **only on recreation** — `docker compose up -d --force-recreate wazuh.master`, not `restart` |
+| nginx: agents can't connect after recreating managers | should not happen (managers have static IPs); if upstreams were changed, `docker restart siem-nginx` re-resolves DNS |
 
 ---
 

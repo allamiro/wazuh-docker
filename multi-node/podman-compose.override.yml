@@ -1,0 +1,90 @@
+# Rootless Podman override (SELinux hosts).
+#
+# The simplest way to run this stack under rootless Podman on an
+# SELinux-enforcing host (RHEL/Alma/Rocky/Fedora) is to disable SELinux label
+# separation for these containers - bind-mounted configs/certs then work
+# without relabeling. For a stricter setup, skip this file and relabel the
+# bind mounts with :Z/:z suffixes instead (see docs/PODMAN.md).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f podman-compose.override.yml up -d
+# (with the podman-docker shim, "docker" is podman)
+services:
+  archiver:
+    security_opt:
+      - label=disable
+  cold1.indexer:
+    security_opt:
+      - label=disable
+  cold2.indexer:
+    security_opt:
+      - label=disable
+  cold3.indexer:
+    security_opt:
+      - label=disable
+  coord1.indexer:
+    security_opt:
+      - label=disable
+  coord2.indexer:
+    security_opt:
+      - label=disable
+  hot1.indexer:
+    security_opt:
+      - label=disable
+  hot2.indexer:
+    security_opt:
+      - label=disable
+  hot3.indexer:
+    security_opt:
+      - label=disable
+  ingest1.indexer:
+    security_opt:
+      - label=disable
+  ingest2.indexer:
+    security_opt:
+      - label=disable
+  master1.indexer:
+    security_opt:
+      - label=disable
+  master2.indexer:
+    security_opt:
+      - label=disable
+  master3.indexer:
+    security_opt:
+      - label=disable
+  ml1.indexer:
+    security_opt:
+      - label=disable
+  nginx:
+    security_opt:
+      - label=disable
+  rustfs:
+    security_opt:
+      - label=disable
+  warm1.indexer:
+    security_opt:
+      - label=disable
+  warm2.indexer:
+    security_opt:
+      - label=disable
+  warm3.indexer:
+    security_opt:
+      - label=disable
+  wazuh.dashboard:
+    security_opt:
+      - label=disable
+  wazuh.master:
+    security_opt:
+      - label=disable
+  wazuh.worker1:
+    security_opt:
+      - label=disable
+  wazuh.worker2:
+    security_opt:
+      - label=disable
+  wazuh.worker3:
+    security_opt:
+      - label=disable
+  wazuh.worker4:
+    security_opt:
+      - label=disable

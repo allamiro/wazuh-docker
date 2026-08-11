@@ -47,6 +47,7 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 | VM / bare-metal specifics | [docs/BAREMETAL.md](docs/BAREMETAL.md) |
 | PKI deep reference | [docs/PKI.md](docs/PKI.md) |
 | Long-term retention (RustFS S3 archive) | [docs/ARCHIVE.md](docs/ARCHIVE.md) |
+| Rootless Podman / SELinux hosts | [docs/PODMAN.md](docs/PODMAN.md) |
 
 Optional modules: `./wazuh-deploy.sh archive enable` adds **RustFS**
 S3 storage (index snapshots + raw-event archives, 1–7 year retention);

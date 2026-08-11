@@ -728,7 +728,7 @@ EOF
         say "  ./wazuh-deploy.sh archive enable                          # re-run to install the TLS dir"
       fi
       say "  docker compose up -d                    # recreates indexers, starts rustfs + archiver"
-      say "  docker compose restart wazuh.master     # picks up the <logall_json> change"
+      say "  docker compose up -d --force-recreate wazuh.master   # config-mount changes apply on RECREATION, not restart"
       say "  ./wazuh-deploy.sh archive init          # buckets, snapshot repository, ISM policy"
       ;;
     init)
