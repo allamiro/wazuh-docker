@@ -736,98 +736,6 @@ services:
       - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
     networks:
       - siem
-  cold2.indexer:
-    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
-    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
-    # root only for the init wrapper (plugin/truststore/keystore setup);
-    # the stock entrypoint then drops to the wazuh-indexer user
-    user: "0"
-    hostname: cold2.indexer
-    container_name: cold2.indexer
-    restart: always
-    cpu_shares: ${IDX_COLD_CPU_SHARES:-512}
-    environment:
-      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
-      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
-      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
-      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP_MIN:-${IDX_COLD_HEAP:-768m}} -Xmx${IDX_COLD_HEAP:-768m}"
-      - "bootstrap.memory_lock=${MEMORY_LOCK:-true}"
-    deploy:
-      resources:
-        limits:
-          memory: ${IDX_COLD_MEM_LIMIT:-1536m}
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    healthcheck:
-      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-    volumes:
-      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
-      - ./config/archive:/archive:ro
-      - indexer-data-cold2:/var/lib/wazuh-indexer
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
-      - ./config/wazuh_indexer_ssl_certs/cold2.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.key
-      - ./config/wazuh_indexer_ssl_certs/cold2.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold2.indexer.pem
-      - ./config/wazuh_indexer/cold2.indexer.yml:/opensearch.node.yml:ro
-      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
-    networks:
-      - siem
-  cold3.indexer:
-    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
-    entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
-    # root only for the init wrapper (plugin/truststore/keystore setup);
-    # the stock entrypoint then drops to the wazuh-indexer user
-    user: "0"
-    hostname: cold3.indexer
-    container_name: cold3.indexer
-    restart: always
-    cpu_shares: ${IDX_COLD_CPU_SHARES:-512}
-    environment:
-      # archive module (inert while ARCHIVE_S3_ENDPOINT is unset)
-      - S3_ENDPOINT=${ARCHIVE_S3_ENDPOINT:-}
-      - S3_REGION=${ARCHIVE_S3_REGION:-us-east-1}
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
-      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
-      - "OPENSEARCH_JAVA_OPTS=-Xms${IDX_COLD_HEAP_MIN:-${IDX_COLD_HEAP:-768m}} -Xmx${IDX_COLD_HEAP:-768m}"
-      - "bootstrap.memory_lock=${MEMORY_LOCK:-true}"
-    deploy:
-      resources:
-        limits:
-          memory: ${IDX_COLD_MEM_LIMIT:-1536m}
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    healthcheck:
-      test: [ "CMD-SHELL", "curl -fks https://localhost:9200/_plugins/_security/health | grep -q '\"status\":\"UP\"'" ]
-      interval: 30s
-      timeout: 10s
-      retries: 10
-      start_period: 120s
-    volumes:
-      - ./scripts/indexer-init.sh:/usr/local/bin/indexer-init.sh:ro
-      - ./config/archive:/archive:ro
-      - indexer-data-cold3:/var/lib/wazuh-indexer
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/usr/share/wazuh-indexer/config/certs/root-ca.pem
-      - ./config/wazuh_indexer_ssl_certs/cold3.indexer-key.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.key
-      - ./config/wazuh_indexer_ssl_certs/cold3.indexer.pem:/usr/share/wazuh-indexer/config/certs/cold3.indexer.pem
-      - ./config/wazuh_indexer/cold3.indexer.yml:/opensearch.node.yml:ro
-      - ./config/wazuh_indexer/internal_users.yml:/usr/share/wazuh-indexer/config/opensearch-security/internal_users.yml
-    networks:
-      - siem
   ingest1.indexer:
     image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.14.7}
     entrypoint: [ "/usr/local/bin/indexer-init.sh" ]
@@ -1228,6 +1136,218 @@ services:
         aliases:
           - sso.${SIEM_DOMAIN:-siem.local.domain}
 
+  # ---------------------------------------------------------------------------
+  # Optional SOC module (profile "soc"): MISP (threat intel) + DFIR-IRIS (case
+  # management, the open-source replacement for TheHive, which went commercial).
+  # Both authenticate through Keycloak OIDC and are reached over TLS via the
+  # nginx vhosts on 8081 (MISP) and 8082 (IRIS).
+  # ---------------------------------------------------------------------------
+  misp-db:
+    image: mariadb:${MARIADB_VERSION:-10.11}
+    profiles: [ "soc" ]
+    hostname: misp-db
+    container_name: misp-db
+    restart: always
+    command: --innodb-buffer-pool-size=256M --innodb-change-buffering=none --max-connections=200
+    deploy:
+      resources:
+        limits:
+          memory: ${MISP_DB_MEM_LIMIT:-768m}
+    environment:
+      - MYSQL_DATABASE=misp
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_DB_PASSWORD:-}
+      - MYSQL_ROOT_PASSWORD=${MISP_DB_ROOT_PASSWORD:-}
+    volumes:
+      - misp-db-data:/var/lib/mysql
+    networks:
+      - siem
+
+  misp-redis:
+    image: valkey/valkey:${VALKEY_VERSION:-7.2}
+    profiles: [ "soc" ]
+    hostname: misp-redis
+    container_name: misp-redis
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    networks:
+      - siem
+
+  misp:
+    image: ghcr.io/misp/misp-docker/misp-core:${MISP_VERSION:-v2.5.1}
+    profiles: [ "soc" ]
+    hostname: misp
+    container_name: misp
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: ${MISP_MEM_LIMIT:-2g}
+    environment:
+      - BASE_URL=https://misp.${SIEM_DOMAIN:-siem.local.domain}:8081
+      - MYSQL_HOST=misp-db
+      - MYSQL_USER=misp
+      - MYSQL_PASSWORD=${MISP_DB_PASSWORD:-}
+      - MYSQL_DATABASE=misp
+      - REDIS_HOST=misp-redis
+      - ADMIN_EMAIL=${MISP_ADMIN_EMAIL:-admin@siem.local}
+      - ADMIN_PASSWORD=${MISP_ADMIN_PASSWORD:-}
+      - ADMIN_ORG=SIEM
+      - ENABLE_DB_SETTINGS=true
+      # air-gap: no feed fetching on boot, no update checks
+      - DISABLE_IPV6=true
+      - DISABLE_SSL_REDIRECT=true
+      # OIDC (Keycloak) - see docs/SOC.md for the realm client
+      - OIDC_ENABLE=${MISP_OIDC_ENABLE:-true}
+      - OIDC_PROVIDER_URL=https://keycloak:8443/realms/siem/.well-known/openid-configuration
+      - OIDC_ISSUER=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443/realms/siem
+      - OIDC_CLIENT_ID=misp
+      - OIDC_CLIENT_SECRET=${MISP_OIDC_SECRET:-}
+      - OIDC_ROLES_PROPERTY=groups
+      - OIDC_ROLES_MAPPING={"siem-admins":"1","siem-analysts":"3","siem-readonly":"6"}
+      - OIDC_DEFAULT_ORG=SIEM
+    volumes:
+      - misp-data:/var/www/MISP/app/files
+      - misp-config:/var/www/MISP/app/Config
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/certs/siem-root-ca.pem:ro
+    depends_on:
+      - misp-db
+      - misp-redis
+    networks:
+      siem:
+        aliases:
+          - misp.${SIEM_DOMAIN:-siem.local.domain}
+
+  misp-modules:
+    image: ghcr.io/misp/misp-docker/misp-modules:${MISP_MODULES_VERSION:-latest}
+    profiles: [ "soc" ]
+    hostname: misp-modules
+    container_name: misp-modules
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: ${MISP_MODULES_MEM_LIMIT:-512m}
+    environment:
+      - REDIS_BACKEND=misp-redis
+    depends_on:
+      - misp-redis
+    networks:
+      - siem
+
+  # --- DFIR-IRIS: incident response case management ---------------------------
+  iris-db:
+    image: ghcr.io/dfir-iris/iriswebapp_db:${IRIS_VERSION:-v2.4.20}
+    profiles: [ "soc" ]
+    hostname: iris-db
+    container_name: iris-db
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: ${IRIS_DB_MEM_LIMIT:-512m}
+    environment:
+      - POSTGRES_USER=${IRIS_DB_USER:-raccoon}
+      - POSTGRES_PASSWORD=${IRIS_DB_PASSWORD:-}
+      - POSTGRES_ADMIN_USER=${IRIS_DB_ADMIN_USER:-raccoon_admin}
+      - POSTGRES_ADMIN_PASSWORD=${IRIS_DB_ADMIN_PASSWORD:-}
+    volumes:
+      - iris-db-data:/var/lib/postgresql/data
+    networks:
+      - siem
+
+  iris-rabbitmq:
+    image: rabbitmq:${RABBITMQ_VERSION:-3-management}
+    profiles: [ "soc" ]
+    hostname: iris-rabbitmq
+    container_name: iris-rabbitmq
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    networks:
+      - siem
+
+  iris-app:
+    image: ghcr.io/dfir-iris/iriswebapp_app:${IRIS_VERSION:-v2.4.20}
+    profiles: [ "soc" ]
+    hostname: iris-app
+    container_name: iris-app
+    restart: always
+    command: ['nohup', './iris-entrypoint.sh', 'iriswebapp']
+    deploy:
+      resources:
+        limits:
+          memory: ${IRIS_MEM_LIMIT:-1536m}
+    environment:
+      - IRIS_WORKER=0
+      - POSTGRES_USER=${IRIS_DB_USER:-raccoon}
+      - POSTGRES_PASSWORD=${IRIS_DB_PASSWORD:-}
+      - POSTGRES_ADMIN_USER=${IRIS_DB_ADMIN_USER:-raccoon_admin}
+      - POSTGRES_ADMIN_PASSWORD=${IRIS_DB_ADMIN_PASSWORD:-}
+      - POSTGRES_SERVER=iris-db
+      - POSTGRES_PORT=5432
+      - IRIS_SECRET_KEY=${IRIS_SECRET_KEY:-}
+      - IRIS_SECURITY_PASSWORD_SALT=${IRIS_SALT:-}
+      - IRIS_ADM_PASSWORD=${IRIS_ADMIN_PASSWORD:-}
+      - IRIS_ADM_API_KEY=${IRIS_API_KEY:-}
+      - CELERY_BROKER=amqp://iris-rabbitmq
+      # Authentication. IRIS 2.4 supports 'local' or 'oidc_proxy' - it does not
+      # speak OIDC itself, it trusts an OAuth2 proxy in front (unlike MISP,
+      # which has native OIDC). The Keycloak client 'iris' already exists;
+      # see docs/SOC.md for the oauth2-proxy service that switches this on.
+      - IRIS_AUTHENTICATION_TYPE=${IRIS_AUTH_TYPE:-local}
+      - OIDC_IRIS_DISCOVERY_URL=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443/realms/siem/.well-known/openid-configuration
+      - OIDC_IRIS_CLIENT_ID=iris
+      - OIDC_IRIS_CLIENT_SECRET=${IRIS_OIDC_SECRET:-}
+      - OIDC_IRIS_APP_ADMIN_ROLE_NAME=siem-admins
+      - TLS_ROOT_CA=/etc/ssl/certs/siem-root-ca.pem
+    volumes:
+      - iris-downloads:/home/iris/downloads
+      - iris-user-db:/home/iris/user_templates
+      - iris-server-data:/home/iris/server_data
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/certs/siem-root-ca.pem:ro
+    depends_on:
+      - iris-db
+      - iris-rabbitmq
+    networks:
+      - siem
+
+  iris-worker:
+    image: ghcr.io/dfir-iris/iriswebapp_app:${IRIS_VERSION:-v2.4.20}
+    profiles: [ "soc" ]
+    hostname: iris-worker
+    container_name: iris-worker
+    restart: always
+    command: ['./wait-for-iriswebapp.sh', 'iris-app:8000', './iris-entrypoint.sh', 'iris-worker']
+    deploy:
+      resources:
+        limits:
+          memory: ${IRIS_WORKER_MEM_LIMIT:-768m}
+    environment:
+      - IRIS_WORKER=1
+      - POSTGRES_USER=${IRIS_DB_USER:-raccoon}
+      - POSTGRES_PASSWORD=${IRIS_DB_PASSWORD:-}
+      - POSTGRES_ADMIN_USER=${IRIS_DB_ADMIN_USER:-raccoon_admin}
+      - POSTGRES_ADMIN_PASSWORD=${IRIS_DB_ADMIN_PASSWORD:-}
+      - POSTGRES_SERVER=iris-db
+      - POSTGRES_PORT=5432
+      - IRIS_SECRET_KEY=${IRIS_SECRET_KEY:-}
+      - IRIS_SECURITY_PASSWORD_SALT=${IRIS_SALT:-}
+      - CELERY_BROKER=amqp://iris-rabbitmq
+    volumes:
+      - iris-downloads:/home/iris/downloads
+      - iris-user-db:/home/iris/user_templates
+      - iris-server-data:/home/iris/server_data
+    depends_on:
+      - iris-app
+    networks:
+      - siem
+
   wazuh.dashboard:
     image: wazuh/wazuh-dashboard:${WAZUH_VERSION:-4.14.7}
     hostname: wazuh.dashboard
@@ -1280,6 +1400,8 @@ services:
       - "1514:1514"
       - "1515:1515"
       - "8080:8080"   # offline maps (TLS vhost -> maps-server)
+      - "8081:8081"   # MISP        (soc profile)
+      - "8082:8082"   # DFIR-IRIS   (soc profile)
     depends_on:
       - wazuh.master
       - wazuh.worker1
@@ -1291,6 +1413,11 @@ services:
       # serves the maps vhost with the dashboard certificate (same hostname)
       - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard.pem:/etc/nginx/certs/maps.pem:ro
       - ./config/wazuh_indexer_ssl_certs/wazuh.dashboard-key.pem:/etc/nginx/certs/maps-key.pem:ro
+      # soc profile vhosts (files exist once 'pki sign' has run)
+      - ./config/wazuh_indexer_ssl_certs/misp.pem:/etc/nginx/certs/misp.pem:ro
+      - ./config/wazuh_indexer_ssl_certs/misp-key.pem:/etc/nginx/certs/misp-key.pem:ro
+      - ./config/wazuh_indexer_ssl_certs/iris.pem:/etc/nginx/certs/iris.pem:ro
+      - ./config/wazuh_indexer_ssl_certs/iris-key.pem:/etc/nginx/certs/iris-key.pem:ro
     networks:
       siem:
         # containers (e.g. the dashboard) resolve the public name to nginx
@@ -1309,6 +1436,13 @@ networks:
           ip_range: 10.77.0.128/25
 
 volumes:
+  misp-db-data:
+  misp-data:
+  misp-config:
+  iris-db-data:
+  iris-downloads:
+  iris-user-db:
+  iris-server-data:
   agent-wazuh-etc:
   agent-wazuh-queue:
   keycloak-data:
@@ -1380,8 +1514,6 @@ volumes:
   indexer-data-warm2:
   indexer-data-warm3:
   indexer-data-cold1:
-  indexer-data-cold2:
-  indexer-data-cold3:
   indexer-data-ingest1:
   indexer-data-ingest2:
   indexer-data-coord1:

@@ -48,6 +48,8 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 | PKI deep reference | [docs/PKI.md](docs/PKI.md) |
 | Long-term retention (RustFS S3 archive) | [docs/ARCHIVE.md](docs/ARCHIVE.md) |
 | Rootless Podman / SELinux hosts | [docs/PODMAN.md](docs/PODMAN.md) |
+| SOC tier: MISP + DFIR-IRIS (SSO) | [docs/SOC.md](docs/SOC.md) |
+| Email/SMTP, alert rules, ACAS/Tenable | [docs/ALERTING.md](docs/ALERTING.md) |
 
 Optional modules (each one command to enable): **RustFS S3 archive**
 (`archive enable` — snapshots + raw-event retention), **offline maps**
@@ -55,8 +57,10 @@ Optional modules (each one command to enable): **RustFS S3 archive**
 Server), **Keycloak SSO** (`sso enable` — OIDC login with
 admin/analyst/readonly groups + audit trail, see
 [docs/SSO.md](docs/SSO.md)), a dedicated **OpenSearch ML node**
-(`COMPOSE_PROFILES=+ml`), and a **host-monitoring agent container** with the
-docker-listener wodle (`agent` profile). External **Windows AD DNS / ADCS**
+(`COMPOSE_PROFILES=+ml`), a **host-monitoring agent container** with the
+docker-listener wodle (`agent` profile), and a **SOC tier** (`soc enable` —
+MISP threat intel + DFIR-IRIS case management, both behind Keycloak, with
+Wazuh integrations that open IRIS alerts and enrich from MISP). External **Windows AD DNS / ADCS**
 integration is built in (`dns records`, `pki export-csr`).
 
 The single-purpose tools (`generate-certs.sh`, `generate-credentials.sh`,

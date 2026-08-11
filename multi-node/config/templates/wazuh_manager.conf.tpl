@@ -125,6 +125,25 @@
     </ssl>
   </indexer>
 
+  <!-- SOC integrations (optional "soc" profile; harmless when it is down).
+       Secrets come from generate-credentials.sh / 'soc enable' via .env and
+       are rendered into this file - never committed. -->
+  <integration>
+    <name>custom-iris</name>
+    <hook_url>https://iris-nginx/api/v2</hook_url>
+    <api_key>REPLACE_WITH_IRIS_API_KEY</api_key>
+    <level>10</level>
+    <alert_format>json</alert_format>
+  </integration>
+
+  <integration>
+    <name>custom-misp</name>
+    <hook_url>http://misp/attributes/restSearch</hook_url>
+    <api_key>REPLACE_WITH_MISP_API_KEY</api_key>
+    <group>web,attack,authentication_failed,sysmon</group>
+    <alert_format>json</alert_format>
+  </integration>
+
   <!-- File integrity monitoring -->
   <syscheck>
     <disabled>no</disabled>

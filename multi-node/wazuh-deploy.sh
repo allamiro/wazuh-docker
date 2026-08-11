@@ -81,12 +81,25 @@ EOF
 }
 
 MAPS_IMAGES() { echo "opensearchproject/opensearch-maps-server:${MAPS_VERSION:-1.0.0}"; }
+SOC_IMAGES() {
+  cat <<EOF
+ghcr.io/misp/misp-docker/misp-core:${MISP_VERSION:-v2.5.1}
+ghcr.io/misp/misp-docker/misp-modules:${MISP_MODULES_VERSION:-latest}
+ghcr.io/dfir-iris/iriswebapp_app:${IRIS_VERSION:-v2.4.20}
+ghcr.io/dfir-iris/iriswebapp_db:${IRIS_VERSION:-v2.4.20}
+ghcr.io/dfir-iris/iriswebapp_nginx:${IRIS_VERSION:-v2.4.20}
+mariadb:${MARIADB_VERSION:-10.11}
+valkey/valkey:${VALKEY_VERSION:-7.2}
+rabbitmq:${RABBITMQ_VERSION:-3-management}
+EOF
+}
 AGENT_IMAGES() { echo "wazuh/wazuh-agent:$WAZUH_VERSION"; }
 TILES_URL="${TILES_URL:-https://maps.opensearch.org/offline/planet-osm-default-z0-z8.tar.gz}"
 
 archive_enabled() { grep -qs '^COMPOSE_PROFILES=.*archive' .env; }
 maps_enabled()    { grep -qs '^COMPOSE_PROFILES=.*maps'    .env; }
 agent_enabled()   { grep -qs '^COMPOSE_PROFILES=.*agent'   .env; }
+soc_enabled()     { grep -qs '^COMPOSE_PROFILES=.*soc'     .env; }
 
 # add <profile> to COMPOSE_PROFILES in .env (creating the line if needed)
 enable_profile() {
@@ -105,6 +118,7 @@ IMAGES() {
   archive_enabled && ARCHIVE_IMAGES || true
   maps_enabled && MAPS_IMAGES || true
   agent_enabled && AGENT_IMAGES || true
+  soc_enabled && SOC_IMAGES || true
 }
 
 inventory() {
@@ -417,7 +431,7 @@ cmd_fetch() {
     while read -r img; do
       say "    $img"
       docker pull -q "$img" >/dev/null
-    done < <(CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES)
+    done < <(CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES; SOC_IMAGES)
     ok "images ready (version pinned $WAZUH_VERSION)"
     local pzip="config/archive/repository-s3-$OPENSEARCH_VERSION.zip"
     if [[ ! -f "$pzip" ]]; then
@@ -477,11 +491,11 @@ cmd_airgap_bundle() {
   local img missing=0
   while read -r img; do
     docker image inspect "$img" >/dev/null 2>&1 || { failm "image not present locally: $img (run fetch first)"; missing=1; }
-  done < <(CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES)
+  done < <(CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES; SOC_IMAGES)
   (( missing == 0 )) || exit 1
   say "    saving images -> images/wazuh-images.tar (several GB, takes a few minutes)"
   # shellcheck disable=SC2046
-  docker save -o "$out/images/wazuh-images.tar" $( (CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES) | tr '\n' ' ')
+  docker save -o "$out/images/wazuh-images.tar" $( (CORE_IMAGES; ARCHIVE_IMAGES; MAPS_IMAGES; AGENT_IMAGES; SOC_IMAGES) | tr '\n' ' ')
 
   # 1b. offline plugin zips (repository-s3 for the archive module)
   if ls config/archive/*.zip >/dev/null 2>&1; then
@@ -661,6 +675,8 @@ cmd_dns() {
     echo "    @{ Name = \"s3\";        IP = \"$host_ip\" },"
     echo "    @{ Name = \"archive\";   IP = \"$host_ip\" },"
     echo "    @{ Name = \"sso\";       IP = \"$host_ip\" },"
+    echo "    @{ Name = \"misp\";      IP = \"$host_ip\" },"
+    echo "    @{ Name = \"iris\";      IP = \"$host_ip\" },"
     # per-node records (docker: all = host_ip; baremetal: per-node IPs)
     awk '/- name:/{n=$3}/hostname:/{h=$2}/ip:/{print n, h, $2}' "$NODES" | \
     while read -r name fqdn ip; do
@@ -686,7 +702,7 @@ PS1
   {
     echo "# Append to /etc/hosts (Linux) or C:\\Windows\\System32\\drivers\\etc\\hosts (Windows)"
     echo "# on every client/agent if no DNS zone is available."
-    echo "$host_ip  $zone dashboard.$zone manager.$zone indexer.$zone s3.$zone archive.$zone sso.$zone"
+    echo "$host_ip  $zone dashboard.$zone manager.$zone indexer.$zone s3.$zone archive.$zone sso.$zone misp.$zone iris.$zone"
   } > config/dns/hosts.snippet
 
   ok "wrote config/dns/add-dns-records.ps1  (run on the Windows DNS server)"
@@ -1019,6 +1035,80 @@ print('   mitre:read granted:', any(p['name']=='mitre_read_mitre' for r in d['ro
   esac
 }
 
+# ==================================================================== soc ====
+# MISP (threat intel) + DFIR-IRIS (case management), both behind Keycloak OIDC.
+cmd_soc() {
+  require_config
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    enable)
+      [[ -f .env ]] || { failm "run ./generate-credentials.sh first"; exit 1; }
+      grep -qs 'OIDC_CLIENT_SECRET' .env || { failm "enable SSO first: ./wazuh-deploy.sh sso enable"; exit 1; }
+      grep -q '^MISP_DB_PASSWORD=' .env || cat >> .env <<SOCEOF
+
+# --- SOC module (MISP + DFIR-IRIS) -------------------------------------------
+MISP_DB_PASSWORD=$(openssl rand -hex 16)
+MISP_DB_ROOT_PASSWORD=$(openssl rand -hex 16)
+MISP_ADMIN_EMAIL=admin@siem.local
+MISP_ADMIN_PASSWORD=Misp1.$(openssl rand -hex 12)
+MISP_OIDC_SECRET=$(openssl rand -hex 20)
+IRIS_DB_USER=raccoon
+IRIS_DB_PASSWORD=$(openssl rand -hex 16)
+IRIS_DB_ADMIN_USER=raccoon_admin
+IRIS_DB_ADMIN_PASSWORD=$(openssl rand -hex 16)
+IRIS_SECRET_KEY=$(openssl rand -hex 32)
+IRIS_SALT=$(openssl rand -hex 16)
+IRIS_ADMIN_PASSWORD=Iris1.$(openssl rand -hex 12)
+IRIS_API_KEY=$(openssl rand -hex 32)
+IRIS_OIDC_SECRET=$(openssl rand -hex 20)
+SOCEOF
+      enable_profile soc
+      # render the realm with all three client secrets
+      sed -e "s|REPLACE_WITH_OIDC_CLIENT_SECRET|$(grep '^OIDC_CLIENT_SECRET=' .env | cut -d= -f2)|" \
+          -e "s|REPLACE_WITH_MISP_OIDC_SECRET|$(grep '^MISP_OIDC_SECRET=' .env | cut -d= -f2)|" \
+          -e "s|REPLACE_WITH_IRIS_OIDC_SECRET|$(grep '^IRIS_OIDC_SECRET=' .env | cut -d= -f2)|" \
+          -e "s|REPLACE_WITH_SSO_ADMIN_PASSWORD|$(grep '^SSO_ADMIN_PASSWORD=' .env | cut -d= -f2)|" \
+          -e "s|REPLACE_WITH_SSO_ANALYST_PASSWORD|$(grep '^SSO_ANALYST_PASSWORD=' .env | cut -d= -f2)|" \
+          config/templates/keycloak-realm.json.tpl > config/keycloak/realm-siem.json
+      ok "realm re-rendered with misp + iris OIDC clients"
+      say ""
+      say "Next:"
+      say "  ./wazuh-deploy.sh pki csr && ./wazuh-deploy.sh pki sign   # misp + iris certs"
+      say "  docker compose up -d                                      # starts the SOC tier"
+      say "  docker compose restart keycloak                           # re-imports the realm clients"
+      say "  ./wazuh-deploy.sh soc init                                # Wazuh -> IRIS/MISP wiring"
+      say "  DNS/hosts: misp.$SIEM_DOMAIN and iris.$SIEM_DOMAIN -> host IP"
+      ;;
+    init)
+      soc_enabled || { failm "soc module not enabled - run: soc enable"; exit 1; }
+      say "[*] Installing the Wazuh -> IRIS / MISP integrations on the master..."
+      docker cp scripts/integrations/custom-iris wazuh.master:/var/ossec/integrations/custom-iris
+      docker cp scripts/integrations/custom-iris.py wazuh.master:/var/ossec/integrations/custom-iris.py
+      docker cp scripts/integrations/custom-misp wazuh.master:/var/ossec/integrations/custom-misp
+      docker cp scripts/integrations/custom-misp.py wazuh.master:/var/ossec/integrations/custom-misp.py
+      docker exec wazuh.master chmod 750 /var/ossec/integrations/custom-iris /var/ossec/integrations/custom-iris.py \
+        /var/ossec/integrations/custom-misp /var/ossec/integrations/custom-misp.py
+      docker exec wazuh.master chown root:wazuh /var/ossec/integrations/custom-iris /var/ossec/integrations/custom-iris.py \
+        /var/ossec/integrations/custom-misp /var/ossec/integrations/custom-misp.py
+      ok "integration scripts installed (enabled by the <integration> blocks in the manager config)"
+      say "[*] Endpoint checks:"
+      local c
+      for spec in "misp:8081:/users/login" "iris:8082:/"; do
+        local h p path
+        IFS=':' read -r h p path <<< "$spec"
+        c=$(curl -ks -o /dev/null -w '%{http_code}' --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
+            --resolve "$h.$SIEM_DOMAIN:$p:127.0.0.1" "https://$h.$SIEM_DOMAIN:$p$path" || true)
+        [[ "$c" =~ ^(200|302|303)$ ]] && ok "$h reachable over TLS (HTTP $c)" \
+          || warn "$h not ready yet (HTTP $c) - first boot takes several minutes"
+      done
+      ;;
+    status)
+      docker ps --filter name=misp --filter name=iris --format '{{.Names}}: {{.Status}}'
+      ;;
+    *) failm "usage: wazuh-deploy.sh soc {enable|init|status}"; exit 1 ;;
+  esac
+}
+
 # ================================================================= deploy ====
 cmd_deploy() {
   require_config
@@ -1177,6 +1267,7 @@ case "$CMD" in
   dns)          cmd_dns "$@" ;;
   maps)         cmd_maps "$@" ;;
   sso)          cmd_sso "$@" ;;
+  soc)          cmd_soc "$@" ;;
   archive)      cmd_archive "$@" ;;
   certificates) cmd_certificates "$@" ;;
   deploy)       cmd_deploy "$@" ;;
@@ -1197,6 +1288,7 @@ wazuh-deploy.sh - unified deployment CLI
   archive enable|init|snapshot|status   optional RustFS S3 long-retention module
   maps enable|init|status               optional offline maps (self-hosted tiles)
   sso enable|init|status                optional Keycloak OIDC single sign-on
+  soc enable|init|status                optional MISP + DFIR-IRIS SOC tier
   dns records                           regenerate AD DNS script / hosts snippet
   deploy docker|baremetal
   verify                       runtime verification
