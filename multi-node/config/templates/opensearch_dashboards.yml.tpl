@@ -5,7 +5,13 @@ opensearch.hosts: ["https://coord1.indexer:9200", "https://coord2.indexer:9200"]
 # Certificates carry proper DNS SANs, so full hostname verification is enabled.
 opensearch.ssl.verificationMode: full
 opensearch.requestHeadersWhitelist: ["securitytenant","Authorization"]
-opensearch_security.multitenancy.enabled: false
+# Multi-tenancy = the OpenSearch equivalent of Kibana "spaces": each tenant is
+# a separate workspace for dashboards/visualizations/saved searches. Tenants
+# and who may use them are declared in config/sso-groups.conf.
+opensearch_security.multitenancy.enabled: true
+opensearch_security.multitenancy.tenants.enable_global: true
+opensearch_security.multitenancy.tenants.enable_private: false
+opensearch_security.multitenancy.tenants.preferred: ["Global"]
 opensearch_security.readonly_mode.roles: ["kibana_read_only"]
 server.ssl.enabled: true
 server.ssl.key: "/usr/share/wazuh-dashboard/certs/wazuh-dashboard-key.pem"

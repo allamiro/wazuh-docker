@@ -15,49 +15,78 @@ accounts and group-based permissions**, while all service/internal accounts
         Indexer security plugin: groups -> backend roles -> permissions
 ```
 
-## Two permission layers (both must be mapped)
+## Permissions: one file, three layers
 
-This trips people up: a Wazuh deployment has **two independent RBAC systems**,
-and an SSO user needs a mapping in each.
+Wazuh has **three independent permission systems**, and this trips everyone up:
+map only one and users log in fine but see *"You have no permissions — this
+section requires mitre:read (\*:\*:\*)"*, or land in an empty workspace.
 
 ```text
-                    Keycloak group (groups claim)
-                              │
-             ┌────────────────┴────────────────┐
-             ▼                                 ▼
-  Indexer security plugin              Wazuh API RBAC
-  (what DATA you can see:              (what the app MODULES can call:
-   indices, dashboards)                 mitre:read, agent:read, rules:update…)
-             │                                 │
-    roles_mapping.yml                 /security/rules  +  /security/roles
-   siem-admins -> all_access          siem-admins -> administrator
+                 config/sso-groups.conf          ← the only file you edit
+                            │
+        ┌───────────────────┼───────────────────┐
+        ▼                   ▼                   ▼
+  indexer roles        Wazuh API roles       tenant
+  (what DATA you       (what MODULES can     (which WORKSPACE:
+   can see: indices,    do: mitre:read,       dashboards, saved
+   dashboards)          agent:read…)          searches — see below)
+        │                   │                   │
+  rolesmapping API    /security/rules +    tenants + tenant_* roles
+                      /security/roles
 ```
 
-Map only the first and login succeeds but every module shows
-*"You have no permissions — this section requires mitre:read (*:*:*)"*.
-`sso init` configures **both**; the API side is applied by `wazuh_api_rbac()`
-in `wazuh-deploy.sh` and is idempotent.
+`./wazuh-deploy.sh sso init` applies all three from that one file
+(`scripts/apply-sso-groups.py`, idempotent — re-run any time).
 
-| Keycloak group | Indexer security roles (data) | Wazuh API roles (modules) |
+### Does Wazuh have "spaces" like Kibana?
+
+Not by that name. The Wazuh dashboard is OpenSearch Dashboards, whose
+equivalent of Kibana **spaces** is **tenants**: a named workspace holding its
+own dashboards, visualizations and saved searches, shared by everyone granted
+access. This deployment enables multi-tenancy and ships two workspaces:
+
+| Tenant | Who | Purpose |
 |---|---|---|
-| `siem-admins` | `all_access` | `administrator` — full API, incl. `mitre:read`, agent management, rules/decoders, security config |
-| `siem-analysts` | `kibana_user`, `readall` | `readonly`, `agents_readonly`, `cluster_readonly` — read every module, change nothing |
-| `siem-readonly` | `kibana_user`, `readall` | `readonly` — separate group so it can be tightened independently |
+| `Global` | everyone | shared/default dashboards (Wazuh's own modules live here) |
+| `soc` | analysts (RW), readonly group (R) | the SOC team's own saved objects |
+
+Private per-user tenants are disabled deliberately (they fragment content and
+complicate backups). Add a workspace by naming a new tenant in
+`sso-groups.conf` — it is created automatically.
+
+### The shipped map
+
+| Keycloak group | Data (indexer roles) | Modules (Wazuh API roles) | Workspace |
+|---|---|---|---|
+| `siem-admins` | `all_access` | `administrator` — everything, incl. `mitre:read`, agents, rules, security config | `Global` RW |
+| `siem-analysts` | `kibana_user`, `readall` | `readonly`, `agents_readonly`, `cluster_readonly` — read every module, change nothing | `soc` RW |
+| `siem-readonly` | `kibana_user`, `readall` | `readonly` | `soc` read-only |
+
+### Adding a team with its own permissions and workspace
+
+```bash
+# 1. create the group in Keycloak (Groups → New), add members
+# 2. one line in config/sso-groups.conf:
+#      compliance|kibana_user,readall|readonly|compliance:RW
+# 3. apply (idempotent):
+./wazuh-deploy.sh sso init          # or: python3 scripts/apply-sso-groups.py
+python3 scripts/apply-sso-groups.py --dry-run    # preview without changing anything
+# 4. members log out and back in
+```
+
+The building blocks you can put in each column are listed in the header of
+`config/sso-groups.conf` (and enumerated live with
+`GET /_plugins/_security/api/roles` on the indexer and `GET /security/roles`
+on the Wazuh API).
+
+**Why log out/in matters:** both the OIDC token and the Wazuh API run_as token
+have their resolved roles minted **at login** (API tokens last ~15 min), so
+permission changes never apply to an existing session.
 
 The dashboard reaches the API as `wazuh-wui` with **run_as**, forwarding the
-logged-in user's authentication context (`user_name` + `backend_roles`); the
-API rules match on `backend_roles`, i.e. the Keycloak groups. Verify both
-layers at once with `./wazuh-deploy.sh sso status`.
-
-**After changing group membership or role mappings, log out and back in** —
-both the OIDC token and the API run_as context are minted at login.
-
-Add more teams (e.g. `soc-managers`, `idp-team`) by creating the group in
-Keycloak, mapping it in `config/wazuh_indexer/security/roles_mapping.yml`
-(data layer) **and** adding it to the `map=(...)` list in `wazuh_api_rbac()`
-(module layer), then re-running `sso init` — it is idempotent. Two test users ship in the
-realm import: `ssoadmin` (siem-admins) and `analyst1` (siem-analysts) —
-passwords in `.env`.
+logged-in user's authentication context (`user_name`, `backend_roles`,
+`roles`, `tenants`); the API rules match on `backend_roles`, i.e. the Keycloak
+groups. Verify every layer at once with `./wazuh-deploy.sh sso status`.
 
 ## Where the secrets live
 
@@ -109,4 +138,6 @@ index.
 | browser redirects to the wrong port (e.g. `:8444`) | the dashboard caches Keycloak's OIDC discovery document at startup — `docker compose restart wazuh.dashboard` after any Keycloak hostname/port change |
 | `DNS_PROBE_FINISHED_NXDOMAIN` / "can't find the server" for `sso.<domain>` | the SSO hostname is not in DNS or the client's hosts file — run `./wazuh-deploy.sh dns records` (the `sso` record is included) |
 | certificate warning on the Keycloak page | import `config/certs-ca/root-ca.pem` into the OS/browser trust store (System keychain → Always Trust on macOS) |
-| SSO login works but shows no data | indexer-side mapping missing — check `./wazuh-deploy.sh sso status` reports indexer roles for the user |
+| SSO login works but shows no data | indexer-side mapping missing — `./wazuh-deploy.sh sso status` should list indexer roles for the user |
+| user lands in an empty workspace / can't save objects | no tenant access — give the group a `tenant` in `config/sso-groups.conf` and re-run `sso init` |
+| changed a group mapping, nothing happened | log out and back in; roles are minted into both tokens at login |

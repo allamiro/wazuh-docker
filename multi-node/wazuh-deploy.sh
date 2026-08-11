@@ -874,56 +874,6 @@ EOF
   esac
 }
 
-# Wazuh API RBAC: map Keycloak groups to Wazuh API roles.
-#
-# This is a SECOND, independent permission layer. The indexer security plugin
-# decides what data a user can see; the Wazuh API has its own RBAC that decides
-# what the Wazuh app modules (MITRE, agents, rules, SCA...) may call. Without
-# these rules an SSO user logs in fine but every module shows
-# "You have no permissions ... mitre:read (*:*:*)".
-#
-# The dashboard authenticates to the API as wazuh-wui with run_as, passing the
-# logged-in user's authentication context (user_name + backend_roles). These
-# rules match that context on backend_roles (the Keycloak groups claim).
-wazuh_api_rbac() {
-  local pw tok
-  pw=$(grep '^API_PASSWORD=' .env | cut -d= -f2)
-  tok=$(curl -ks -u "wazuh-wui:$pw" --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
-        --resolve "wazuh.master:55000:127.0.0.1" \
-        -X POST "https://wazuh.master:55000/security/user/authenticate?raw=true")
-  [[ -n "$tok" ]] || { failm "cannot authenticate to the Wazuh API"; return 1; }
-  local api=(curl -ks -H "Authorization: Bearer $tok" -H "Content-Type: application/json"
-             --cacert config/wazuh_indexer_ssl_certs/root-ca.pem
-             --resolve "wazuh.master:55000:127.0.0.1")
-
-  # group|role_ids  (1 administrator, 2 readonly, 4 agents_readonly, 6 cluster_readonly)
-  local map=("siem-admins|1" "siem-analysts|2,4,6" "siem-readonly|2")
-  local existing entry group roles rname rid
-  existing=$("${api[@]}" "https://wazuh.master:55000/security/rules")
-  for entry in "${map[@]}"; do
-    group="${entry%%|*}"; roles="${entry##*|}"
-    rname="sso_${group//-/_}"
-    rid=$(printf '%s' "$existing" | python3 -c "
-import json,sys
-d=json.load(sys.stdin)['data']['affected_items']
-print(next((str(r['id']) for r in d if r['name']=='$rname'), ''))" 2>/dev/null)
-    if [[ -z "$rid" ]]; then
-      rid=$("${api[@]}" -X POST "https://wazuh.master:55000/security/rules" \
-        -d "{\"name\":\"$rname\",\"rule\":{\"FIND\":{\"backend_roles\":\"$group\"}}}" \
-        | python3 -c "
-import json,sys
-a=json.load(sys.stdin)['data']['affected_items']
-print(a[0]['id'] if a else '')" 2>/dev/null)
-    fi
-    [[ -n "$rid" ]] || { failm "could not create API rule for $group"; return 1; }
-    local r
-    for r in ${roles//,/ }; do
-      "${api[@]}" -X POST "https://wazuh.master:55000/security/roles/$r/rules?rule_ids=$rid" >/dev/null
-    done
-    ok "Wazuh API RBAC: $group -> role id(s) $roles (rule $rid)"
-  done
-}
-
 # ==================================================================== sso ====
 # Keycloak OIDC single sign-on for the dashboard + indexer security plugin.
 cmd_sso() {
@@ -1021,46 +971,8 @@ config:
         authentication_backend:
           type: noop
 SECEOF
-      docker exec master1.indexer cat /usr/share/wazuh-indexer/config/opensearch-security/roles_mapping.yml \
-        > config/wazuh_indexer/security/roles_mapping.yml
-      python3 /dev/stdin <<'PYEOF'
-t = open("config/wazuh_indexer/security/roles_mapping.yml").read()
-def add(t, role, extra):
-    marker = f'{role}:'
-    i = t.index(marker)
-    j = t.index('backend_roles:', i)
-    k = t.index('\n', j)
-    line = t[j:k]
-    insert = k + 1
-    add_lines = ''.join(f'  - "{e}"\n' for e in extra)
-    # append after the first existing backend role line
-    m = t.index('\n', t.index('- ', insert))
-    return t[:m+1] + add_lines + t[m+1:]
-for role, extra in [("all_access", ["siem-admins"]),
-                    ("kibana_user", ["siem-analysts", "siem-readonly"]),
-                    ("readall", ["siem-analysts", "siem-readonly"])]:
-    try:
-        t = add(t, role, extra)
-    except ValueError:
-        pass
-open("config/wazuh_indexer/security/roles_mapping.yml", "w").write(t)
-print("roles_mapping patched")
-PYEOF
-      docker exec master1.indexer mkdir -p /tmp/secconf
-      docker cp config/wazuh_indexer/security/config.yml master1.indexer:/tmp/secconf/config.yml
-      docker cp config/wazuh_indexer/security/roles_mapping.yml master1.indexer:/tmp/secconf/roles_mapping.yml
-      local sa="bash /usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh -h master1.indexer -p 9200 -icl -nhnv -cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem -cert /usr/share/wazuh-indexer/config/certs/admin.pem -key /usr/share/wazuh-indexer/config/certs/admin-key.pem"
-      docker exec -e OPENSEARCH_JAVA_HOME=/usr/share/wazuh-indexer/jdk master1.indexer \
-        $sa -f /tmp/secconf/config.yml -t config >/dev/null \
-        && ok "security config.yml applied (basic + openid auth domains)" \
-        || { failm "securityadmin failed for config.yml"; exit 1; }
-      docker exec -e OPENSEARCH_JAVA_HOME=/usr/share/wazuh-indexer/jdk master1.indexer \
-        $sa -f /tmp/secconf/roles_mapping.yml -t rolesmapping >/dev/null \
-        && ok "roles mapping applied (siem-admins -> all_access; analysts/readonly -> kibana_user + readall)" \
-        || { failm "securityadmin failed for roles_mapping.yml"; exit 1; }
-
-      say "[*] Mapping Keycloak groups to Wazuh API roles (second RBAC layer)..."
-      wazuh_api_rbac || { failm "Wazuh API RBAC mapping failed"; exit 1; }
+      say "[*] Applying config/sso-groups.conf to every permission layer..."
+      python3 scripts/apply-sso-groups.py || { failm "group mapping failed"; exit 1; }
 
       if [[ -f config/ism/security-audit-retention-policy.json ]]; then
         idx_api PUT "/_plugins/_ism/policies/security-audit-retention" \
@@ -1081,6 +993,7 @@ PYEOF
         | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token',''))")
       [[ -n "$tok" ]] || { failm "could not obtain OIDC token for analyst1"; exit 1; }
       ok "OIDC token issued for analyst1 (direct grant against the realm)"
+      say "   group map: config/sso-groups.conf"
       docker exec master1.indexer curl -s \
         --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem \
         -H "Authorization: Bearer $tok" \
