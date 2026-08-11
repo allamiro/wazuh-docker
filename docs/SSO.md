@@ -54,6 +54,32 @@ Private per-user tenants are disabled deliberately (they fragment content and
 complicate backups). Add a workspace by naming a new tenant in
 `sso-groups.conf` — it is created automatically.
 
+**Important:** a tenant separates *saved objects* (dashboards, visualizations,
+saved searches), **not the data behind them**. Two teams in different tenants
+still query the same alerts unless you also scope the data. For real
+multi-organization separation combine all three columns:
+
+| Goal | Mechanism | Column |
+|---|---|---|
+| separate dashboards/saved searches | tenant (workspace) | `tenant` |
+| separate the alerts each team can query | document-level security (DLS) | `data_scope` |
+| separate which agents a team can manage | Wazuh API roles scoped to `agent:group:<name>` | `api_roles` |
+
+Example — a finance business unit that only ever sees its own agents:
+
+```text
+finance-soc|kibana_user|readonly|finance:RW|agent.name:fin-*
+```
+
+Verified behaviour (measured on this deployment, 1115 alerts total): a group
+scoped to `agent.name:nonexistent-*` sees **0**; scoped to
+`agent.name:docker-host*` it sees **184** — only that agent's alerts, while an
+unscoped admin still sees all 1115.
+
+⚠️ **DLS is additive across roles.** A scoped group must *not* also hold
+`readall` or `all_access`, or it sees everything regardless of the filter —
+`sso init` warns when that combination appears.
+
 ### The shipped map
 
 | Keycloak group | Data (indexer roles) | Modules (Wazuh API roles) | Workspace |

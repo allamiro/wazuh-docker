@@ -80,14 +80,16 @@ def parse_groups():
         if not line or line.startswith("#"):
             continue
         parts = [p.strip() for p in line.split("|")]
-        if len(parts) != 4:
+        if len(parts) not in (4, 5):
             raise SystemExit(f"[FAIL] malformed line in sso-groups.conf: {line}")
-        group, idx_roles, api_roles, tenant = parts
+        group, idx_roles, api_roles, tenant = parts[:4]
+        scope = parts[4] if len(parts) == 5 else "-"
         rows.append({
             "group": group,
             "indexer_roles": [r for r in idx_roles.split(",") if r and r != "-"],
             "api_roles": [r for r in api_roles.split(",") if r and r != "-"],
             "tenant": tenant if tenant != "-" else None,
+            "data_scope": scope if scope != "-" else None,
         })
     return rows
 
@@ -125,6 +127,31 @@ def ensure_tenant(name, access, group):
              "index_permissions": [],
              "tenant_permissions": [{"tenant_patterns": [name],
                                      "allowed_actions": actions}]})
+    return ensure_indexer_role_mapping(role, group), role
+
+
+def ensure_data_scope(group, query):
+    """Document-level security: this group only sees matching alerts.
+
+    NOTE: DLS is additive across roles - a group that also holds an
+    unrestricted read role (e.g. readall) is NOT restricted. Give scoped
+    groups kibana_user only.
+    """
+    role = f"scope_{group.replace('-', '_')}"
+    if not DRY:
+        idx("PUT", f"/_plugins/_security/api/roles/{role}", {
+            "cluster_permissions": ["cluster_composite_ops_ro"],
+            "index_permissions": [{
+                "index_patterns": ["wazuh-alerts-*", "wazuh-archives-*",
+                                   "wazuh-states-*", "wazuh-monitoring-*"],
+                "dls": json.dumps({"query_string": {"query": query}}),
+                "fls": [],
+                "masked_fields": [],
+                "allowed_actions": ["read", "indices:admin/mappings/get",
+                                    "indices:admin/get"],
+            }],
+            "tenant_permissions": [],
+        })
     return ensure_indexer_role_mapping(role, group), role
 
 
@@ -169,6 +196,12 @@ def main():
             name, _, access = row["tenant"].partition(":")
             state, role = ensure_tenant(name, access or "RW", g)
             print(f"     tenant   {name + ' (' + (access or 'RW') + ')':<28} {state} via {role}")
+        if row["data_scope"]:
+            state, role = ensure_data_scope(g, row["data_scope"])
+            print(f"     scope    {row['data_scope'][:28]:<28} {state} via {role}")
+            if any(r in ("readall", "all_access") for r in row["indexer_roles"]):
+                print("       [WARN] this group also has readall/all_access - "
+                      "DLS is additive, so the scope will NOT restrict it")
         state, rid = ensure_api_rule(g, row["api_roles"], role_ids, rules)
         print(f"     modules  {','.join(row['api_roles']):<28} {state}"
               + (f" (rule {rid})" if rid else ""))
