@@ -874,6 +874,56 @@ EOF
   esac
 }
 
+# Wazuh API RBAC: map Keycloak groups to Wazuh API roles.
+#
+# This is a SECOND, independent permission layer. The indexer security plugin
+# decides what data a user can see; the Wazuh API has its own RBAC that decides
+# what the Wazuh app modules (MITRE, agents, rules, SCA...) may call. Without
+# these rules an SSO user logs in fine but every module shows
+# "You have no permissions ... mitre:read (*:*:*)".
+#
+# The dashboard authenticates to the API as wazuh-wui with run_as, passing the
+# logged-in user's authentication context (user_name + backend_roles). These
+# rules match that context on backend_roles (the Keycloak groups claim).
+wazuh_api_rbac() {
+  local pw tok
+  pw=$(grep '^API_PASSWORD=' .env | cut -d= -f2)
+  tok=$(curl -ks -u "wazuh-wui:$pw" --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
+        --resolve "wazuh.master:55000:127.0.0.1" \
+        -X POST "https://wazuh.master:55000/security/user/authenticate?raw=true")
+  [[ -n "$tok" ]] || { failm "cannot authenticate to the Wazuh API"; return 1; }
+  local api=(curl -ks -H "Authorization: Bearer $tok" -H "Content-Type: application/json"
+             --cacert config/wazuh_indexer_ssl_certs/root-ca.pem
+             --resolve "wazuh.master:55000:127.0.0.1")
+
+  # group|role_ids  (1 administrator, 2 readonly, 4 agents_readonly, 6 cluster_readonly)
+  local map=("siem-admins|1" "siem-analysts|2,4,6" "siem-readonly|2")
+  local existing entry group roles rname rid
+  existing=$("${api[@]}" "https://wazuh.master:55000/security/rules")
+  for entry in "${map[@]}"; do
+    group="${entry%%|*}"; roles="${entry##*|}"
+    rname="sso_${group//-/_}"
+    rid=$(printf '%s' "$existing" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['data']['affected_items']
+print(next((str(r['id']) for r in d if r['name']=='$rname'), ''))" 2>/dev/null)
+    if [[ -z "$rid" ]]; then
+      rid=$("${api[@]}" -X POST "https://wazuh.master:55000/security/rules" \
+        -d "{\"name\":\"$rname\",\"rule\":{\"FIND\":{\"backend_roles\":\"$group\"}}}" \
+        | python3 -c "
+import json,sys
+a=json.load(sys.stdin)['data']['affected_items']
+print(a[0]['id'] if a else '')" 2>/dev/null)
+    fi
+    [[ -n "$rid" ]] || { failm "could not create API rule for $group"; return 1; }
+    local r
+    for r in ${roles//,/ }; do
+      "${api[@]}" -X POST "https://wazuh.master:55000/security/roles/$r/rules?rule_ids=$rid" >/dev/null
+    done
+    ok "Wazuh API RBAC: $group -> role id(s) $roles (rule $rid)"
+  done
+}
+
 # ==================================================================== sso ====
 # Keycloak OIDC single sign-on for the dashboard + indexer security plugin.
 cmd_sso() {
@@ -1009,6 +1059,9 @@ PYEOF
         && ok "roles mapping applied (siem-admins -> all_access; analysts/readonly -> kibana_user + readall)" \
         || { failm "securityadmin failed for roles_mapping.yml"; exit 1; }
 
+      say "[*] Mapping Keycloak groups to Wazuh API roles (second RBAC layer)..."
+      wazuh_api_rbac || { failm "Wazuh API RBAC mapping failed"; exit 1; }
+
       if [[ -f config/ism/security-audit-retention-policy.json ]]; then
         idx_api PUT "/_plugins/_ism/policies/security-audit-retention" \
           "$(cat config/ism/security-audit-retention-policy.json)" >/dev/null 2>&1 || true
@@ -1032,7 +1085,22 @@ PYEOF
         --cacert /usr/share/wazuh-indexer/config/certs/root-ca.pem \
         -H "Authorization: Bearer $tok" \
         "https://master1.indexer:9200/_plugins/_security/authinfo" \
-        | python3 -c "import json,sys; d=json.load(sys.stdin); print('   user:', d.get('user_name')); print('   backend roles:', d.get('backend_roles')); print('   mapped security roles:', d.get('roles'))"
+        | python3 -c "import json,sys; d=json.load(sys.stdin); print('   user:', d.get('user_name')); print('   backend roles:', d.get('backend_roles')); print('   indexer roles:', d.get('roles'))"
+      # second layer: what the Wazuh API grants this user via run_as
+      local pw rt
+      pw=$(grep '^API_PASSWORD=' .env | cut -d= -f2)
+      rt=$(curl -ks -u "wazuh-wui:$pw" -H "Content-Type: application/json" \
+        --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
+        --resolve "wazuh.master:55000:127.0.0.1" \
+        -X POST "https://wazuh.master:55000/security/user/authenticate/run_as?raw=true" \
+        -d '{"user_name":"analyst1","backend_roles":["siem-analysts"]}')
+      curl -ks -H "Authorization: Bearer $rt" --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
+        --resolve "wazuh.master:55000:127.0.0.1" "https://wazuh.master:55000/security/users/me" \
+        | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['data']['affected_items'][0]
+print('   wazuh API roles:', [r['name'] for r in d['roles']])
+print('   mitre:read granted:', any(p['name']=='mitre_read_mitre' for r in d['roles'] for p in r['policies']))"
       ;;
     *) failm "usage: wazuh-deploy.sh sso {enable|init|status}"; exit 1 ;;
   esac
