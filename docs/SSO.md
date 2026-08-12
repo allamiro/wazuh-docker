@@ -15,6 +15,69 @@ accounts and group-based permissions**, while all service/internal accounts
         Indexer security plugin: groups -> backend roles -> permissions
 ```
 
+## Keycloak is the single source: groups, clients, federation
+
+Every group the deployment references must exist in the realm, because all
+three applications authorise from the token's `groups` claim. The names live
+in the two config files, and one command reconciles them:
+
+```bash
+python3 scripts/sync-keycloak-groups.py --dry-run   # what is missing
+python3 scripts/sync-keycloak-groups.py             # create them
+```
+
+It reads `config/sso-groups.conf` (Wazuh) and `config/iris-groups.conf`
+(IRIS), so a group added to either file appears in Keycloak on the next run —
+nothing drifts and nothing is clicked by hand.
+
+### Exporting the realm for production
+
+```bash
+python3 scripts/sync-keycloak-groups.py --export realm-siem.json
+```
+
+Produces one importable file containing the realm settings, all **clients**
+(with their redirect URIs and protocol mappers) and all **groups**. On the
+production Keycloak:
+
+```bash
+kc.sh import --file realm-siem.json --override true
+python3 scripts/apply-sso-clients.py      # re-issues the client secrets
+```
+
+**Client secrets are deliberately not in the export** — the Keycloak admin API
+never returns them. They live in `.env` as `<NAME>_OIDC_SECRET`, and
+`apply-sso-clients.py` writes them back into the realm, so a production import
+is: import the file, run that script, done.
+
+### Federating from ADFS or LDAP / Active Directory
+
+In production you will not create users in Keycloak — the directory owns them.
+Keycloak sits in front and maps the directory's groups onto the names above:
+
+**LDAP / Active Directory** (User Federation → Add LDAP provider):
+
+1. Set the connection (LDAPS 636, bind DN, users DN) and `Import Users: On`.
+2. Add a **group-ldap-mapper**: `Groups DN` = where your AD groups live,
+   `Group Object Classes` = `group`, `Mode` = `READ_ONLY`,
+   `Membership LDAP Attribute` = `member`,
+   `User Groups Retrieve Strategy` = `LOAD_GROUPS_BY_MEMBER_ATTRIBUTE`.
+3. Either name your AD groups exactly as above (`soc-tier1`, …) or create the
+   Keycloak groups and add the AD groups as members — the claim carries the
+   Keycloak group name either way.
+
+**ADFS / any SAML-or-OIDC IdP** (Identity Providers → add):
+
+1. Add the provider and import its metadata.
+2. Add an **Attribute Importer** / **Advanced Claim to Group** mapper per
+   role, mapping the incoming claim (e.g. `http://schemas.xmlsoap.org/claims/Group`
+   = `SOC-Tier1`) to the Keycloak group `soc-tier1`.
+
+Either way, the mapping surface stays exactly the same downstream: Keycloak
+group → Wazuh roles/tenant/DLS, MISP role id, IRIS group and case access. Add
+a team by creating one directory group, one line in each config file, and
+re-running the sync scripts.
+
 ## Permissions: one file, three layers
 
 Wazuh has **three independent permission systems**, and this trips everyone up:

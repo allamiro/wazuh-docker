@@ -18,3 +18,4 @@ config/wazuh_indexer_ssl_certs/
 csr-bundle-*.tar.gz
 dist/
 wazuh-airgap-*/
+config/keycloak/realm-siem-export.json
