@@ -51,6 +51,7 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 | Rootless Podman / SELinux hosts | [docs/PODMAN.md](docs/PODMAN.md) |
 | SOC tier: MISP + DFIR-IRIS (SSO) | [docs/SOC.md](docs/SOC.md) |
 | **Running it as a SOC: roles, groups, IR workflow** | [docs/SOC-OPERATIONS.md](docs/SOC-OPERATIONS.md) |
+| **SOC architecture: gaps, roadmap, data flows** | [docs/SOC-ARCHITECTURE.md](docs/SOC-ARCHITECTURE.md) |
 | Email/SMTP, alert rules, ACAS/Tenable | [docs/ALERTING.md](docs/ALERTING.md) |
 
 Optional modules (each one command to enable): **RustFS S3 archive**
