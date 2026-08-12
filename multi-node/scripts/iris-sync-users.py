@@ -79,5 +79,58 @@ def main():
               + ("" if status == "success" else f" - {str(res)[:140]}"))
 
 
+
+
+# --- group membership -------------------------------------------------------
+# IRIS auto-creates an SSO user on first login but puts it in NO group, and
+# since v2.4.0 the default case access is deny_all - so the user logs in and
+# then gets "ACCESS DENIED" everywhere. Map Keycloak groups to IRIS groups.
+#
+#   Keycloak group -> IRIS group name
+IRIS_GROUP_MAP = {
+    "siem-admins": "Administrators",
+    "soc-engineer": "Administrators",
+    "siem-analysts": "Analysts",
+    "siem-readonly": "Analysts",
+    "soc-tier1": "Analysts",
+    "soc-tier2": "Analysts",
+    "soc-tier3": "Analysts",
+}
+
+# Which IRIS group each shipped SSO account belongs in
+USER_GROUPS = {
+    "ssoadmin@siem.local": "Administrators",
+    "analyst1@siem.local": "Analysts",
+}
+
+
+def sql(query):
+    import subprocess
+    out = subprocess.run(["docker", "exec", "iris-db", "psql", "-U", "raccoon_admin",
+                          "-d", "iris_db", "-tAc", query],
+                         capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def sync_groups():
+    """Put every known user into its IRIS group (idempotent)."""
+    print("\nGroup membership:")
+    for email, group in USER_GROUPS.items():
+        # IRIS stores the login rather than the address as e-mail when the
+        # IdP omits the email claim, so match on either form
+        login = email.split("@")[0]
+        uid = sql("select id from \"user\" where email = '%s' or email = '%s' or \"user\" = '%s' limit 1" % (email, login, login))
+        gid = sql(f"select group_id from groups where group_name = '{group}'")
+        if not uid or not gid:
+            print(f"  [SKIP] {email} -> {group} (user or group missing yet)")
+            continue
+        sql(f"insert into user_group (user_id, group_id) select {uid}, {gid} "
+            f"where not exists (select 1 from user_group where user_id={uid} and group_id={gid})")
+        print(f"  [OK  ] {email} -> {group}")
+    print("\nUsers appear here only after their first SSO login (IRIS creates")
+    print("them then); re-run this script afterwards to grant the group.")
+
+
 if __name__ == "__main__":
     main()
+    sync_groups()
