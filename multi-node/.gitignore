@@ -19,3 +19,4 @@ csr-bundle-*.tar.gz
 dist/
 wazuh-airgap-*/
 config/keycloak/realm-siem-export.json
+soc-test-users.txt

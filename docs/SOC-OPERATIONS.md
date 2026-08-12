@@ -107,6 +107,38 @@ Note the two IRIS layers stay in step: the script sets **group permissions**
 `user_case_effective_access` — miss that second step and users hold every
 permission yet are refused every case.
 
+### Test accounts for every role
+
+One account per role, so you can log in as each and confirm what it really
+sees before real people depend on it:
+
+```bash
+python3 scripts/soc-test-users.py            # create (passwords generated)
+python3 scripts/soc-test-users.py --delete   # remove before go-live
+```
+
+Creates `t1.analyst`, `t2.analyst`, `t3.responder`, `intel.analyst`,
+`soc.manager`, `soc.engineer` and `auditor` in their groups, writes the
+credentials to `soc-test-users.txt` (chmod 600, gitignored) and prints them.
+
+Verified resolution — each role really is different:
+
+| Test user | Group | Indexer roles | Wazuh API roles |
+|---|---|---|---|
+| t1.analyst | soc-tier1 | kibana_user, tenant_soc_rw | readonly, agents_readonly |
+| t2.analyst | soc-tier2 | kibana_user, tenant_soc_rw | readonly, agents_readonly, cluster_readonly |
+| t3.responder | soc-tier3 | kibana_user, tenant_ir_rw | agents_admin, cluster_readonly |
+| intel.analyst | soc-intel | kibana_user, tenant_intel_rw | readonly |
+| soc.manager | soc-manager | kibana_user, tenant_soc_rw | readonly, cluster_readonly |
+| soc.engineer | soc-engineer | kibana_user (all_access) | administrator |
+| auditor | soc-audit | kibana_user, tenant_soc_ro | readonly |
+
+Note the separate workspaces: the IR team lands in `ir`, intel in `intel`,
+and the auditor gets `soc` read-only.
+
+After a test user logs into IRIS once, run
+`python3 scripts/iris-sync-users.py` to grant its IRIS group and case access.
+
 ### Principles worth keeping
 
 - **Only `soc-engineer` gets `all_access` / `administrator`.** Analysts never
