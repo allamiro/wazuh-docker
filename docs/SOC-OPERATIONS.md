@@ -84,6 +84,29 @@ soc-audit|kibana_user,readall|readonly|soc:R
 
 then `./wazuh-deploy.sh sso init`. Members log out and back in.
 
+### Applying it to IRIS
+
+IRIS groups, their permission masks and their default case access are
+declared in
+[`config/iris-groups.conf`](../multi-node/config/iris-groups.conf) — the same
+pattern as the Wazuh group map:
+
+```bash
+python3 scripts/iris-sync-groups.py --dry-run   # preview
+python3 scripts/iris-sync-groups.py             # create/update the groups
+python3 scripts/iris-sync-users.py              # map users + refresh case access
+```
+
+Shipped groups (permission bitmask in brackets — IRIS stores it as an int):
+Administrators (65535), Analysts (1133), Read Only (5189), SOC Tier 1 (5197),
+SOC Tier 2 (5485), SOC Tier 3 (7549), Threat Intel (5221), SOC Manager
+(65381), Audit (7173). Reorganise the file and re-run; nothing else changes.
+
+Note the two IRIS layers stay in step: the script sets **group permissions**
+*and* **group case access**, then `iris-sync-users.py` recomputes
+`user_case_effective_access` — miss that second step and users hold every
+permission yet are refused every case.
+
 ### Principles worth keeping
 
 - **Only `soc-engineer` gets `all_access` / `administrator`.** Analysts never
