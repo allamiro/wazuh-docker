@@ -1337,6 +1337,55 @@ services:
     networks:
       - siem
 
+  # IRIS does not speak OIDC itself (2.4 supports only 'local' or
+  # 'oidc_proxy'), so Keycloak SSO is delivered by this OAuth2 proxy: it runs
+  # the OIDC flow against the realm and passes the identity to IRIS in headers.
+  # Same pattern the IRIS project documents; the 'iris' Keycloak client is
+  # confidential and separate from the misp / wazuh-dashboard clients.
+  iris-sso:
+    image: quay.io/oauth2-proxy/oauth2-proxy:${OAUTH2_PROXY_VERSION:-v7.7.1}
+    profiles: [ "soc" ]
+    hostname: iris-sso
+    container_name: iris-sso
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    environment:
+      - OAUTH2_PROXY_PROVIDER=oidc
+      - OAUTH2_PROXY_OIDC_ISSUER_URL=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443/realms/siem
+      - OAUTH2_PROXY_CLIENT_ID=iris
+      - OAUTH2_PROXY_CLIENT_SECRET=${IRIS_OIDC_SECRET:-}
+      - OAUTH2_PROXY_COOKIE_SECRET=${IRIS_COOKIE_SECRET:-}
+      - OAUTH2_PROXY_COOKIE_SECURE=true
+      - OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:4180
+      - OAUTH2_PROXY_UPSTREAMS=http://iris-app:8000
+      - OAUTH2_PROXY_REDIRECT_URL=https://iris.${SIEM_DOMAIN:-siem.local.domain}:8082/oauth2/callback
+      - OAUTH2_PROXY_EMAIL_DOMAINS=*
+      - OAUTH2_PROXY_PROVIDER_CA_FILES=/etc/ssl/certs/siem-root-ca.pem
+      - OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY=false
+      # identity handed to IRIS
+      - OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER=true
+      - OAUTH2_PROXY_SET_XAUTHREQUEST=true
+      - OAUTH2_PROXY_PASS_ACCESS_TOKEN=true
+      - OAUTH2_PROXY_SET_AUTHORIZATION_HEADER=true
+      - OAUTH2_PROXY_SKIP_PROVIDER_BUTTON=true
+      # IRIS identifies users by e-mail; without this the proxy forwards the
+      # Keycloak subject UUID and IRIS reports "user ... is not registered"
+      - OAUTH2_PROXY_PREFER_EMAIL_TO_USER=true
+      - OAUTH2_PROXY_REVERSE_PROXY=true
+      # NOTE: no "groups" scope - it is not a realm client scope; the group
+      # claim is injected by the clients own protocol mapper. Requesting it
+      # makes Keycloak reject the flow with invalid_scope.
+      - OAUTH2_PROXY_SCOPE=openid profile email
+    volumes:
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/certs/siem-root-ca.pem:ro
+    depends_on:
+      - iris-app
+    networks:
+      - siem
+
   # --- DFIR-IRIS: incident response case management ---------------------------
   iris-db:
     image: ghcr.io/dfir-iris/iriswebapp_db:${IRIS_VERSION:-v2.4.20}
@@ -1377,6 +1426,7 @@ services:
     hostname: iris-app
     container_name: iris-app
     restart: always
+    entrypoint: [ "/usr/local/bin/iris-init.sh" ]
     command: ['nohup', './iris-entrypoint.sh', 'iriswebapp']
     deploy:
       resources:
@@ -1401,7 +1451,13 @@ services:
       # speak OIDC itself, it trusts an OAuth2 proxy in front (unlike MISP,
       # which has native OIDC). The Keycloak client 'iris' already exists;
       # see docs/SOC.md for the oauth2-proxy service that switches this on.
-      - IRIS_AUTHENTICATION_TYPE=${IRIS_AUTH_TYPE:-local}
+      - IRIS_AUTHENTICATION_TYPE=${IRIS_AUTH_TYPE:-oidc_proxy}
+      # provision SSO users on first login - without this IRIS decodes the
+      # token, finds no local account and immediately signs the user out
+      - IRIS_AUTHENTICATION_CREATE_USER_IF_NOT_EXIST=True
+      # IRIS validates the audience; the Keycloak client has a matching
+      # audience mapper so its tokens carry aud=iris
+      - OIDC_IRIS_AUDIENCE=iris
       - OIDC_IRIS_DISCOVERY_URL=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443/realms/siem/.well-known/openid-configuration
       - OIDC_IRIS_CLIENT_ID=iris
       - OIDC_IRIS_CLIENT_SECRET=${IRIS_OIDC_SECRET:-}
@@ -1411,8 +1467,9 @@ services:
       - iris-downloads:/home/iris/downloads
       - iris-user-db:/home/iris/user_templates
       - iris-server-data:/home/iris/server_data
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/siem-root-ca.pem:ro
-      - ./scripts/misp-init.sh:/usr/local/bin/misp-init.sh:ro
+      # required in oidc_proxy mode: IRIS validates Keycloak TLS at startup
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/certs/siem-root-ca.pem:ro
+      - ./scripts/iris-init.sh:/usr/local/bin/iris-init.sh:ro
     depends_on:
       - iris-db
       - iris-rabbitmq

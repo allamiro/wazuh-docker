@@ -997,6 +997,10 @@ SECEOF
       fi
       ok "SSO initialized - test with: ./wazuh-deploy.sh sso status"
       ;;
+    clients)
+      # declarative client registry -> Keycloak (idempotent)
+      python3 scripts/apply-sso-clients.py "$@" || { failm "client sync failed"; exit 1; }
+      ;;
     status)
       local tok
       tok=$(curl -ks --cacert config/wazuh_indexer_ssl_certs/root-ca.pem \
@@ -1287,7 +1291,7 @@ wazuh-deploy.sh - unified deployment CLI
   pki csr|export-csr|sign [--ca ...]|import [dir]|verify
   archive enable|init|snapshot|status   optional RustFS S3 long-retention module
   maps enable|init|status               optional offline maps (self-hosted tiles)
-  sso enable|init|status                optional Keycloak OIDC single sign-on
+  sso enable|init|clients|status        optional Keycloak OIDC single sign-on
   soc enable|init|status                optional MISP + DFIR-IRIS SOC tier
   dns records                           regenerate AD DNS script / hosts snippet
   deploy docker|baremetal

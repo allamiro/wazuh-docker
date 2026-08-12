@@ -50,6 +50,7 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 | Long-term retention (RustFS S3 archive) | [docs/ARCHIVE.md](docs/ARCHIVE.md) |
 | Rootless Podman / SELinux hosts | [docs/PODMAN.md](docs/PODMAN.md) |
 | SOC tier: MISP + DFIR-IRIS (SSO) | [docs/SOC.md](docs/SOC.md) |
+| **Running it as a SOC: roles, groups, IR workflow** | [docs/SOC-OPERATIONS.md](docs/SOC-OPERATIONS.md) |
 | Email/SMTP, alert rules, ACAS/Tenable | [docs/ALERTING.md](docs/ALERTING.md) |
 
 Optional modules (each one command to enable): **RustFS S3 archive**
