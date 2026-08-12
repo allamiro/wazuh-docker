@@ -1342,53 +1342,9 @@ services:
   # the OIDC flow against the realm and passes the identity to IRIS in headers.
   # Same pattern the IRIS project documents; the 'iris' Keycloak client is
   # confidential and separate from the misp / wazuh-dashboard clients.
-  iris-sso:
-    image: quay.io/oauth2-proxy/oauth2-proxy:${OAUTH2_PROXY_VERSION:-v7.7.1}
-    profiles: [ "soc" ]
-    hostname: iris-sso
-    container_name: iris-sso
-    restart: always
-    deploy:
-      resources:
-        limits:
-          memory: 256m
-    environment:
-      - OAUTH2_PROXY_PROVIDER=oidc
-      - OAUTH2_PROXY_OIDC_ISSUER_URL=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443/realms/siem
-      - OAUTH2_PROXY_CLIENT_ID=iris
-      - OAUTH2_PROXY_CLIENT_SECRET=${IRIS_OIDC_SECRET:-}
-      - OAUTH2_PROXY_COOKIE_SECRET=${IRIS_COOKIE_SECRET:-}
-      - OAUTH2_PROXY_COOKIE_SECURE=true
-      - OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:4180
-      - OAUTH2_PROXY_UPSTREAMS=http://iris-app:8000
-      - OAUTH2_PROXY_REDIRECT_URL=https://iris.${SIEM_DOMAIN:-siem.local.domain}:8082/oauth2/callback
-      - OAUTH2_PROXY_EMAIL_DOMAINS=*
-      - OAUTH2_PROXY_PROVIDER_CA_FILES=/etc/ssl/certs/siem-root-ca.pem
-      - OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY=false
-      # identity handed to IRIS
-      - OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER=true
-      - OAUTH2_PROXY_SET_XAUTHREQUEST=true
-      - OAUTH2_PROXY_PASS_ACCESS_TOKEN=true
-      - OAUTH2_PROXY_SET_AUTHORIZATION_HEADER=true
-      - OAUTH2_PROXY_SKIP_PROVIDER_BUTTON=true
-      # IRIS identifies users by e-mail; without this the proxy forwards the
-      # Keycloak subject UUID and IRIS reports "user ... is not registered"
-      - OAUTH2_PROXY_PREFER_EMAIL_TO_USER=true
-      - OAUTH2_PROXY_REVERSE_PROXY=true
-      # NOTE: no "groups" scope - it is not a realm client scope; the group
-      # claim is injected by the clients own protocol mapper. Requesting it
-      # makes Keycloak reject the flow with invalid_scope.
-      - OAUTH2_PROXY_SCOPE=openid profile email
-    volumes:
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/certs/siem-root-ca.pem:ro
-    depends_on:
-      - iris-app
-    networks:
-      - siem
-
   # --- DFIR-IRIS: incident response case management ---------------------------
   iris-db:
-    image: ghcr.io/dfir-iris/iriswebapp_db:${IRIS_VERSION:-v2.4.20}
+    image: ghcr.io/dfir-iris/iriswebapp_db:${IRIS_VERSION:-v2.4.29}
     profiles: [ "soc" ]
     hostname: iris-db
     container_name: iris-db
@@ -1421,7 +1377,7 @@ services:
       - siem
 
   iris-app:
-    image: ghcr.io/dfir-iris/iriswebapp_app:${IRIS_VERSION:-v2.4.20}
+    image: ghcr.io/dfir-iris/iriswebapp_app:${IRIS_VERSION:-v2.4.29}
     profiles: [ "soc" ]
     hostname: iris-app
     container_name: iris-app
@@ -1451,17 +1407,20 @@ services:
       # speak OIDC itself, it trusts an OAuth2 proxy in front (unlike MISP,
       # which has native OIDC). The Keycloak client 'iris' already exists;
       # see docs/SOC.md for the oauth2-proxy service that switches this on.
-      - IRIS_AUTHENTICATION_TYPE=${IRIS_AUTH_TYPE:-oidc_proxy}
-      # provision SSO users on first login - without this IRIS decodes the
-      # token, finds no local account and immediately signs the user out
+      # Native OIDC (IRIS >= 2.4.27). No OAuth2 proxy required: IRIS runs the
+      # authorization-code flow itself against Keycloak and redirects to
+      # /oidc-authorize, which is the redirect URI registered for the 'iris'
+      # client in config/sso-clients.conf.
+      - IRIS_AUTHENTICATION_TYPE=${IRIS_AUTH_TYPE:-oidc}
+      - OIDC_ISSUER_URL=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443/realms/siem
+      - OIDC_CLIENT_ID=iris
+      - OIDC_CLIENT_SECRET=${IRIS_OIDC_SECRET:-}
+      - OIDC_SCOPES=openid email profile
+      - OIDC_MAPPING_USERNAME=preferred_username
+      - OIDC_MAPPING_EMAIL=email
+      # keep local accounts usable as break-glass if Keycloak is unavailable
+      - AUTHENTICATION_LOCAL_FALLBACK=${IRIS_LOCAL_FALLBACK:-True}
       - IRIS_AUTHENTICATION_CREATE_USER_IF_NOT_EXIST=True
-      # IRIS validates the audience; the Keycloak client has a matching
-      # audience mapper so its tokens carry aud=iris
-      - OIDC_IRIS_AUDIENCE=iris
-      - OIDC_IRIS_DISCOVERY_URL=https://sso.${SIEM_DOMAIN:-siem.local.domain}:8443/realms/siem/.well-known/openid-configuration
-      - OIDC_IRIS_CLIENT_ID=iris
-      - OIDC_IRIS_CLIENT_SECRET=${IRIS_OIDC_SECRET:-}
-      - OIDC_IRIS_APP_ADMIN_ROLE_NAME=siem-admins
       - TLS_ROOT_CA=/etc/ssl/certs/siem-root-ca.pem
     volumes:
       - iris-downloads:/home/iris/downloads
@@ -1477,7 +1436,7 @@ services:
       - siem
 
   iris-worker:
-    image: ghcr.io/dfir-iris/iriswebapp_app:${IRIS_VERSION:-v2.4.20}
+    image: ghcr.io/dfir-iris/iriswebapp_app:${IRIS_VERSION:-v2.4.29}
     profiles: [ "soc" ]
     hostname: iris-worker
     container_name: iris-worker

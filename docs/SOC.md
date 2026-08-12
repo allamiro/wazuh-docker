@@ -83,33 +83,73 @@ OIDC_ROLES_MAPPING={"siem-admins":"1","siem-analysts":"3","siem-readonly":"6"}
 (MISP role ids: 1 admin, 3 user, 6 read-only.) Set `MISP_OIDC_ENABLE=false` in
 `.env` to fall back to local MISP accounts.
 
-### IRIS SSO — via an OAuth2 proxy
+### IRIS SSO — native OIDC (IRIS >= 2.4.27)
 
-**IRIS 2.4 does not speak OIDC natively.** Its `IRIS_AUTHENTICATION_TYPE`
-accepts only `local` or `oidc_proxy`; in the latter it trusts an OAuth2 proxy
-in front of it. The deployment ships with `local` so it boots cleanly, and the
-Keycloak `iris` client is already created for when you switch. To enable:
+IRIS speaks OIDC directly from 2.4.27 onward: it runs the authorization-code
+flow itself against Keycloak and no OAuth2 proxy is involved. The deployment
+runs **v2.4.29** configured this way:
 
 ```yaml
-  iris-sso:                       # add to docker-compose.yml, profile: [ "soc" ]
-    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
-    environment:
-      - OAUTH2_PROXY_PROVIDER=oidc
-      - OAUTH2_PROXY_OIDC_ISSUER_URL=https://sso.siem.local.domain:8443/realms/siem
-      - OAUTH2_PROXY_CLIENT_ID=iris
-      - OAUTH2_PROXY_CLIENT_SECRET=${IRIS_OIDC_SECRET}
-      - OAUTH2_PROXY_COOKIE_SECRET=<openssl rand -base64 32>
-      - OAUTH2_PROXY_UPSTREAMS=http://iris-app:8000
-      - OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:4180
-      - OAUTH2_PROXY_EMAIL_DOMAINS=*
-      - OAUTH2_PROXY_PROVIDER_CA_FILES=/etc/ssl/certs/siem-root-ca.pem
-      - OAUTH2_PROXY_SET_XAUTHREQUEST=true
-      - OAUTH2_PROXY_PASS_AUTHORIZATION_HEADER=true
+  - IRIS_AUTHENTICATION_TYPE=oidc
+  - OIDC_ISSUER_URL=https://sso.siem.local.domain:8443/realms/siem
+  - OIDC_CLIENT_ID=iris
+  - OIDC_CLIENT_SECRET=${IRIS_OIDC_SECRET}
+  - OIDC_SCOPES=openid email profile
+  - OIDC_MAPPING_USERNAME=preferred_username
+  - OIDC_MAPPING_EMAIL=email
+  - AUTHENTICATION_LOCAL_FALLBACK=True     # break-glass local login
+  - TLS_ROOT_CA=/etc/ssl/certs/siem-root-ca.pem
 ```
 
-then point the nginx `8082` vhost at `http://iris-sso:4180` and set
-`IRIS_AUTH_TYPE=oidc_proxy` in `.env`. IRIS reads the group claim through
-`OIDC_IRIS_APP_ADMIN_ROLE_NAME=siem-admins` (already set) to grant admin.
+The Keycloak redirect URI is **`/oidc-authorize`** — already registered for
+the `iris` client in
+[`config/sso-clients.conf`](../multi-node/config/sso-clients.conf). The login
+page then shows an **SSO** link; users land back on `/dashboard` authenticated.
+
+`AUTHENTICATION_LOCAL_FALLBACK=True` keeps the local `administrator` account
+usable when Keycloak is unavailable — deliberate: SSO is a single point of
+failure and this is the way back in.
+
+**Users must still exist in IRIS.** Its documentation is explicit that for
+local, LDAP *and* OIDC "users need to be declared in IRIS"; the platform
+authenticates by lookup. Provision them with:
+
+```bash
+python3 scripts/iris-sync-users.py     # idempotent; re-run after adding people
+```
+
+### Upgrading IRIS (and what to change)
+
+Version is a single variable, so an upgrade is a pull plus a recreate:
+
+```bash
+# connected side: pull and ship in the bundle
+docker pull ghcr.io/dfir-iris/iriswebapp_app:v2.4.29
+docker pull ghcr.io/dfir-iris/iriswebapp_db:v2.4.29
+./wazuh-deploy.sh airgap bundle
+
+# air-gapped side
+./wazuh-deploy.sh airgap import /media/<bundle>
+sed -i 's/^IRIS_VERSION=.*/IRIS_VERSION=v2.4.29/' .env   # or edit by hand
+docker compose up -d --force-recreate iris-app iris-worker iris-db
+```
+
+Configuration changes that come with the versions:
+
+| From → to | What changes | Action |
+|---|---|---|
+| ≤ 2.4.20 → ≥ 2.4.27 | native `oidc` auth type appears | set `IRIS_AUTH_TYPE=oidc` and the `OIDC_*` block above; delete any oauth2-proxy service and point the nginx `8082` vhost back at `iris-app:8000` |
+| any | database schema migrations | run automatically by the app on first start — watch `docker compose logs -f iris-app` for alembic output before declaring the upgrade done |
+| any | module versions | modules live in the image; after upgrading, `python3 scripts/iris-modules.py list` and re-apply configuration if a module reset (`configure-misp`) |
+
+Roll back by setting `IRIS_VERSION` to the previous tag and recreating —
+**but** database migrations are not reversible, so snapshot the `iris-db-data`
+volume before a major upgrade:
+
+```bash
+docker run --rm -v multi-node_iris-db-data:/v -v "$PWD:/backup" \
+  nginx:1.29-alpine tar czf /backup/iris-db-$(date +%F).tar.gz -C /v .
+```
 
 ## Wazuh integrations
 

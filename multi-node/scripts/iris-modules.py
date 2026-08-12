@@ -13,6 +13,7 @@ module's JSON configuration live.
     python3 scripts/iris-modules.py disable iris_webhooks_module
     python3 scripts/iris-modules.py configure-misp     # point it at our MISP
     python3 scripts/iris-modules.py configure-webhook <url>
+    python3 scripts/iris-modules.py upgrade-all        # install cached wheels
 
 Adding a module that is NOT in the image (air gap):
     # on the connected staging host
@@ -154,6 +155,21 @@ def cmd_install(wheel):
     print("     restart to register: docker compose restart iris-app iris-worker")
 
 
+def cmd_upgrade_all():
+    """Install every wheel sitting in airgap-cache/iris-modules (offline)."""
+    d = ROOT / "airgap-cache/iris-modules"
+    wheels = sorted(d.glob("*.whl")) if d.exists() else []
+    if not wheels:
+        sys.exit(f"[FAIL] no wheels in {d} - run scripts/iris-modules-fetch.sh "
+                 "on the connected host and ship them in the bundle")
+    print(f"Installing {len(wheels)} wheel(s) from {d.relative_to(ROOT)}\n")
+    for w in wheels:
+        cmd_install(str(w))
+    print("\nRestart to register the new versions:")
+    print("  docker compose restart iris-app iris-worker")
+    print("Then confirm:  python3 scripts/iris-modules.py list")
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
@@ -168,6 +184,8 @@ def main():
         cmd_configure_misp()
     elif cmd == "configure-webhook" and len(sys.argv) > 2:
         cmd_configure_webhook(sys.argv[2])
+    elif cmd == "upgrade-all":
+        cmd_upgrade_all()
     elif cmd == "install" and len(sys.argv) > 2:
         cmd_install(sys.argv[2])
     else:
