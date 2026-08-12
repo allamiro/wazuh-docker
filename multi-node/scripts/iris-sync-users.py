@@ -131,6 +131,44 @@ def sync_groups():
     print("them then); re-run this script afterwards to grant the group.")
 
 
+
+
+def refresh_case_access():
+    """Recompute user_case_effective_access from group grants.
+
+    IRIS derives each user's per-case access from customer/group/user ACLs into
+    user_case_effective_access, and only recomputes it when membership changes
+    through the UI or API. Because this script grants groups directly in the
+    database, the effective table has to be refreshed too - otherwise the user
+    holds every permission yet still sees "Access denied while trying to
+    access case #1" (level 1 = deny_all, 2 = read_only, 4 = full_access).
+    """
+    print("\nCase access (effective):")
+    # best level any of the user's groups grants for each case
+    rows = sql(
+        "select ug.user_id, gca.case_id, max(gca.access_level) "
+        "from user_group ug join group_case_access gca on gca.group_id = ug.group_id "
+        "group by ug.user_id, gca.case_id")
+    if not rows:
+        print("  (no group case grants yet)")
+        return
+    for line in rows.splitlines():
+        uid, case_id, level = line.split("|")
+        existing = sql(f"select access_level from user_case_effective_access "
+                       f"where user_id={uid} and case_id={case_id}")
+        if existing == level:
+            continue
+        if existing:
+            sql(f"update user_case_effective_access set access_level={level} "
+                f"where user_id={uid} and case_id={case_id}")
+        else:
+            sql(f"insert into user_case_effective_access (user_id, case_id, access_level) "
+                f"values ({uid}, {case_id}, {level})")
+        name = sql(f'select "user" from "user" where id={uid}')
+        print(f"  [OK  ] {name}: case {case_id} -> level {level}")
+
+
 if __name__ == "__main__":
     main()
     sync_groups()
+    refresh_case_access()
