@@ -128,6 +128,16 @@ blocking alert processing. Tune thresholds by editing the `<level>` / `<group>`
 values in `config/templates/wazuh_manager.conf.tpl` and re-running
 `generate-credentials.sh`-style rendering (secrets are injected from `.env`).
 
+## Troubleshooting (real issues hit during deployment)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| MISP: every page *Internal Server Error*; log shows `RedisException: ERR AUTH called without any password configured` | MISP always authenticates to Redis, but the server had no password set | `misp-redis` now starts with `--requirepass` and MISP gets a matching `REDIS_PASSWORD` (both from `MISP_REDIS_PASSWORD` in `.env`) |
+| MISP: 500 with `OpenIDConnectClientException: cURL error #60: SSL certificate problem` | PHP cURL could not verify Keycloak's TLS certificate - the deployment root CA was not in the container's system trust store | `scripts/misp-init.sh` installs the CA with `update-ca-certificates` before the stock entrypoint runs |
+| IRIS: *An Internal Error Has Occurred*; log shows `RuntimeError: A secret key is required to use CSRF` | `configuration.py` assigns `SECRET_KEY` only when `IRIS_WORKER` is **absent** - even `IRIS_WORKER=0` skips the whole block | the variable is set only on `iris-worker`, never on `iris-app` |
+| IRIS: 502; log shows `database "iris_db" does not exist` | the app crashed before its first-boot database initialisation could run | create it once: `docker exec iris-db createdb -U raccoon_admin -O raccoon iris_db` |
+| IRIS: 502; log shows `function gen_random_uuid() does not exist` | a hand-created database lacks the `pgcrypto` extension the schema needs | `docker exec iris-db psql -U raccoon_admin -d iris_db -c 'CREATE EXTENSION IF NOT EXISTS pgcrypto;'` |
+
 ## Operating notes
 
 - MISP's first boot initializes its database and can take several minutes;

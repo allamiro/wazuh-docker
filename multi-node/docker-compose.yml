@@ -1257,6 +1257,10 @@ services:
 
   misp-redis:
     image: valkey/valkey:${VALKEY_VERSION:-7.2}
+    # MISP always authenticates to Redis, so the server must require a
+    # password - otherwise every page 500s with
+    # "ERR AUTH called without any password configured"
+    command: ["valkey-server", "--requirepass", "${MISP_REDIS_PASSWORD:-changeme}"]
     profiles: [ "soc" ]
     hostname: misp-redis
     container_name: misp-redis
@@ -1270,6 +1274,7 @@ services:
 
   misp:
     image: ghcr.io/misp/misp-docker/misp-core:${MISP_VERSION:-v2.5.1}
+    entrypoint: [ "/usr/local/bin/misp-init.sh" ]
     profiles: [ "soc" ]
     hostname: misp
     container_name: misp
@@ -1285,6 +1290,7 @@ services:
       - MYSQL_PASSWORD=${MISP_DB_PASSWORD:-}
       - MYSQL_DATABASE=misp
       - REDIS_HOST=misp-redis
+      - REDIS_PASSWORD=${MISP_REDIS_PASSWORD:-changeme}
       - ADMIN_EMAIL=${MISP_ADMIN_EMAIL:-admin@siem.local}
       - ADMIN_PASSWORD=${MISP_ADMIN_PASSWORD:-}
       - ADMIN_ORG=SIEM
@@ -1304,7 +1310,8 @@ services:
     volumes:
       - misp-data:/var/www/MISP/app/files
       - misp-config:/var/www/MISP/app/Config
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/certs/siem-root-ca.pem:ro
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/siem-root-ca.pem:ro
+      - ./scripts/misp-init.sh:/usr/local/bin/misp-init.sh:ro
     depends_on:
       - misp-db
       - misp-redis
@@ -1376,7 +1383,9 @@ services:
         limits:
           memory: ${IRIS_MEM_LIMIT:-1536m}
     environment:
-      - IRIS_WORKER=0
+      # IRIS_WORKER must be UNSET on the app container: configuration.py only
+      # assigns SECRET_KEY/CSRF settings when the variable is absent, so even
+      # IRIS_WORKER=0 breaks every page with "A secret key is required".
       - POSTGRES_USER=${IRIS_DB_USER:-raccoon}
       - POSTGRES_PASSWORD=${IRIS_DB_PASSWORD:-}
       - POSTGRES_ADMIN_USER=${IRIS_DB_ADMIN_USER:-raccoon_admin}
@@ -1402,7 +1411,8 @@ services:
       - iris-downloads:/home/iris/downloads
       - iris-user-db:/home/iris/user_templates
       - iris-server-data:/home/iris/server_data
-      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/etc/ssl/certs/siem-root-ca.pem:ro
+      - ./config/wazuh_indexer_ssl_certs/root-ca.pem:/siem-root-ca.pem:ro
+      - ./scripts/misp-init.sh:/usr/local/bin/misp-init.sh:ro
     depends_on:
       - iris-db
       - iris-rabbitmq
