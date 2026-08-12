@@ -128,6 +128,79 @@ blocking alert processing. Tune thresholds by editing the `<level>` / `<group>`
 values in `config/templates/wazuh_manager.conf.tpl` and re-running
 `generate-credentials.sh`-style rendering (secrets are injected from `.env`).
 
+## IRIS modules (and how they survive the air gap)
+
+Every module DFIR-IRIS ships is **already inside the container image** — so an
+air-gapped deployment downloads nothing to use them. They only need enabling
+and configuring:
+
+| Module | Version | Purpose |
+|---|---|---|
+| `iris_misp_module` | 1.3.0 | enrich IOCs from MISP (manual right-click, or automatically on IOC create/update) |
+| `iris_webhooks_module` | 1.0.8 | push IRIS events to Slack/Teams/SOAR webhooks |
+| `iris_vt_module` | 1.2.1 | VirusTotal enrichment (internet-dependent — leave off in an enclave) |
+| `iris_intelowl_module` | 0.1.0 | IntelOwl analysis |
+| `iris_check_module` | 1.0.1 | logs every hook; useful to prove the module pipeline works |
+
+```bash
+python3 scripts/iris-modules.py list                    # what exists, what is on
+python3 scripts/iris-modules.py configure-misp          # point IrisMISP at our MISP + enable
+python3 scripts/iris-modules.py configure-webhook https://soar.internal/hook
+python3 scripts/iris-modules.py enable  iris_check_module
+python3 scripts/iris-modules.py disable iris_vt_module  # no internet in the enclave
+docker compose restart iris-app iris-worker             # required after changes
+```
+
+`configure-misp` writes the module's JSON configuration (URL `https://misp`
+on the internal network, TLS verified against the deployment CA) and turns on
+enrichment for IOC create, IOC update and the manual right-click. It needs a
+MISP API key: create one in MISP under **Administration → List Auth Keys →
+Add**, then
+
+```bash
+echo 'MISP_API_KEY=<key>' >> .env
+python3 scripts/iris-modules.py configure-misp
+```
+
+Once enabled, IOCs added to a case are enriched from MISP automatically —
+which replaces most of what the Wazuh-side `custom-misp` integration does, and
+puts the intel where the analyst is working. Keep both if you also want MISP
+hits to become Wazuh alerts.
+
+### Modules that are NOT in the image
+
+Build the wheel on the connected staging host, ship it in the bundle, install
+offline:
+
+```bash
+# connected side
+git clone https://github.com/dfir-iris/iris-misp-module.git && cd iris-misp-module
+python3 setup.py bdist_wheel
+cp dist/*.whl <repo>/multi-node/airgap-cache/iris-modules/
+./wazuh-deploy.sh airgap bundle          # carries airgap-cache/iris-modules/
+
+# air-gapped side, after 'airgap import'
+python3 scripts/iris-modules.py install airgap-cache/iris-modules/<file>.whl
+docker compose restart iris-app iris-worker
+```
+
+`pip3 install --no-index` is used, so nothing reaches for an index.
+
+### Report templates
+
+IRIS generates DOCX/Markdown/HTML reports from templates, and the example
+templates are downloads — so they are fetched on the connected side and
+carried in the bundle:
+
+```bash
+./wazuh-deploy.sh fetch        # -> airgap-cache/iris-templates/
+```
+
+Upload them in IRIS under **Advanced → Templates** (investigation report and
+activities report). Tags available to a template are listed at
+`/case/export?cid=1` on your own instance — useful when tailoring the
+document to your reporting standard.
+
 ## Troubleshooting (real issues hit during deployment)
 
 | Symptom | Cause | Fix |

@@ -447,6 +447,14 @@ cmd_fetch() {
       curl -fSL --retry 3 -o "$ttar" "$TILES_URL"
     fi
     ok "offline map tiles cached ($ttar)"
+    # DFIR-IRIS report templates - not in the image, needed for offline report
+    # generation. Module wheels only matter for modules NOT already shipped.
+    mkdir -p "$CACHE/iris-templates" "$CACHE/iris-modules"
+    for f in iris_report_template.docx iris_activities_template.docx; do
+      [[ -f "$CACHE/iris-templates/$f" ]] || curl -fsSL -o "$CACHE/iris-templates/$f" \
+        "https://docs.dfir-iris.org/latest/operations/example_reports/$f" || true
+    done
+    ok "IRIS report templates cached ($CACHE/iris-templates)"
   else
     say "[*] Downloading native packages (pinned $WAZUH_VERSION) into $CACHE/packages ..."
     mkdir -p "$CACHE/packages/deb" "$CACHE/packages/rpm"
@@ -504,7 +512,15 @@ cmd_airgap_bundle() {
     say "    included OpenSearch plugin zips"
   fi
 
-  # 1c. offline map tiles (maps module)
+  # 1c. IRIS report templates + any extra module wheels
+  for d in iris-templates iris-modules; do
+    if ls "$CACHE/$d"/* >/dev/null 2>&1; then
+      mkdir -p "$out/$d"; cp "$CACHE/$d"/* "$out/$d/"
+      say "    included $d"
+    fi
+  done
+
+  # 1d. offline map tiles (maps module)
   if ls "$CACHE"/maps/*.tar.gz >/dev/null 2>&1; then
     mkdir -p "$out/maps"
     cp "$CACHE"/maps/*.tar.gz "$out/maps/"
@@ -580,6 +596,12 @@ cmd_airgap_import() {
     cp "$dir"/plugins/*.zip config/archive/
     ok "OpenSearch plugin zips copied to config/archive/"
   fi
+  for d in iris-templates iris-modules; do
+    if ls "$dir/$d"/* >/dev/null 2>&1; then
+      mkdir -p "$CACHE/$d"; cp "$dir/$d"/* "$CACHE/$d/"
+      ok "$d copied to $CACHE/$d/"
+    fi
+  done
   if ls "$dir"/maps/*.tar.gz >/dev/null 2>&1; then
     mkdir -p "$CACHE/maps"
     cp "$dir"/maps/*.tar.gz "$CACHE/maps/"
