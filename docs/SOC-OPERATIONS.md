@@ -10,6 +10,55 @@ Companion documents: [SSO.md](SSO.md) (how the group map is applied),
 
 ---
 
+## 0. The operating model this implements
+
+Structured on the NCSC *Building a Security Operations Centre* model, so the
+roles below are functions of a recognised operating model rather than an
+invented hierarchy:
+
+```text
+┌───────────────────────────── Leadership and Governance ─────────────────────────────┐
+├─────────────────────────────── Support and Service ─────────────────────────────────┤
+│   INFORM                    │   DEVELOP                  │   RESPOND                │
+│   Threat Intelligence       │   Develop new detection    │   Front Door             │
+│   Threat Hunting            │   Maintain and update      │   Triage                 │
+│   Research                  │   Automation               │   Incident Response      │
+│   Onboarding                │   Engineering              │   Incident Management    │
+├──────────────────────────────────── Technology ─────────────────────────────────────┤
+└─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Each function maps to a Keycloak group, and each group already carries its
+permissions in all three tools:
+
+| NCSC pillar | Function | Keycloak group | Where the work happens |
+|---|---|---|---|
+| **Inform** | Threat Intelligence | `soc-intel` | MISP (org admin), `intel` workspace |
+| **Inform** | Threat Hunting | `soc-hunt` | Wazuh Threat Hunting + `hunt` workspace, cross-case search in IRIS |
+| **Inform** | Onboarding (log sources) | `soc-onboarding` | Wazuh agents (`agents_admin`), enrollment |
+| **Develop** | Detection content | `soc-detection` | rules/decoders authoring, `detect` workspace |
+| **Develop** | Engineering / Automation | `soc-engineer` | platform admin, deploys detection content |
+| **Respond** | Front Door + Triage | `soc-tier1` | IRIS alert queue, `soc` workspace |
+| **Respond** | Incident Response | `soc-tier2`, `soc-tier3` | IRIS cases; Tier 3 holds `agents_admin` for containment |
+| **Respond** | Incident Management | `soc-manager` | case review, outcomes, templates, metrics |
+| **Support** | Vulnerability Management | `soc-vuln` | Wazuh VD + ACAS/Tenable imports, `vuln` workspace |
+| **Governance** | Assurance / audit | `soc-audit` | read-only everywhere, activity trails |
+
+Two deliberate choices worth defending:
+
+- **Detection authoring and detection deployment are split.** `soc-detection`
+  writes and tests content but holds read-only Wazuh API roles; `soc-engineer`
+  deploys it. That keeps a review step between "I wrote a rule" and "the
+  production ruleset changed", which is what makes the audit trail meaningful.
+- **Hunting is its own function, not senior triage.** NCSC treats it as an
+  Inform activity feeding Develop — so `soc-hunt` gets its own workspace and
+  cross-case search, and its findings become detection content rather than
+  one-off investigations.
+
+If you are a smaller team, collapse groups rather than skipping functions: one
+person can hold `soc-hunt` and `soc-tier3`, but the *function* should still
+have an owner, because that is what the model is asserting.
+
 ## 1. One identity source, three consumers
 
 ```text
