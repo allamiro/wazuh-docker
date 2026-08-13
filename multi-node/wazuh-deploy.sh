@@ -671,65 +671,121 @@ cmd_dns() {
   require_config
   local sub="${1:-records}"
   [[ "$sub" == "records" ]] || { failm "usage: wazuh-deploy.sh dns records"; exit 1; }
+  # Written by 'configure' alongside deployment.yml; without it the per-node
+  # records would silently vanish from the generated script.
+  [[ -f "$NODES" ]] || { failm "no $NODES - run: ./wazuh-deploy.sh configure"; exit 1; }
   local host_ip zone
   host_ip=$(cfg dns host_ip 10.0.0.50)
   zone="$SIEM_DOMAIN"
   mkdir -p config/dns
 
-  # ---- Windows AD DNS (run on a DC / DNS admin workstation) ----
+  # Collect "<short> <ip>" pairs. The apex and public aliases come first and
+  # win any collision, so the node entries that also resolve to a public alias
+  # (both coordinators carry indexer.<zone>) do not emit a second record.
+  local recs="" seen=" " skipped=0 name fqdn ip short alias
+  for alias in @ dashboard manager indexer s3 archive sso misp iris; do
+    recs+="$alias $host_ip"$'\n'
+    seen+="$alias "
+  done
+  while read -r name fqdn ip; do
+    [[ "$ip" == "docker-internal" ]] && ip="$host_ip"
+    short="${fqdn%.$zone}"
+    [[ "$short" == "$fqdn" ]] && continue      # hostname not under the zone
+    [[ "$seen" == *" $short "* ]] && continue  # already covered by an alias
+    if [[ "$ip" == "REPLACE_ME" ]]; then
+      warn "no ip for $fqdn in $NODES - record skipped"
+      skipped=$((skipped + 1)); continue
+    fi
+    recs+="$short $ip"$'\n'
+    seen+="$short "
+  done < <(awk '/- name:/{n=$3}/hostname:/{h=$2}/ip:/{print n, h, $2}' "$NODES")
+
+  # PowerShell array literal: build the whole block, then drop the one
+  # trailing comma - an empty node list would otherwise leave "}," before ")".
+  local body="" pair
+  while read -r name ip; do
+    [[ -n "$name" ]] || continue
+    body+="    @{ Name = \"$name\"; IP = \"$ip\" },"$'\n'
+  done <<< "$recs"
+  body="${body%,$'\n'}"
+
+  # ---- Windows AD DNS ----
   {
     echo "# Adds/updates every DNS record for the Wazuh deployment in AD DNS."
     echo "# Zone: $zone   Deployment host IP: $host_ip"
     echo "# Generated from config/nodes.yml by 'wazuh-deploy.sh dns records'."
-    echo "# Idempotent: existing records are updated to the current IP."
+    echo "#"
+    echo "# Dry run by default - prints what it would change. Add -Apply to write."
+    echo "# Runs against the local machine unless -DnsServer <fqdn> is given."
+    echo "#   .\\add-dns-records.ps1                       # preview"
+    echo "#   .\\add-dns-records.ps1 -Apply                # apply, on the DNS server"
+    echo "#   .\\add-dns-records.ps1 -Apply -DnsServer dc1.corp.example.com"
+    echo ""
+    echo "param([switch]\$Apply, [string]\$DnsServer)"
     echo ""
     echo "\$zone = \"$zone\""
-    echo "if (-not (Get-DnsServerZone -Name \$zone -ErrorAction SilentlyContinue)) {"
-    echo "    Add-DnsServerPrimaryZone -Name \$zone -ReplicationScope \"Forest\""
-    echo "}"
     echo ""
     echo "\$records = @("
-    # apex + public aliases all point at the deployment host
-    echo "    @{ Name = \"@\";         IP = \"$host_ip\" },"
-    echo "    @{ Name = \"dashboard\"; IP = \"$host_ip\" },"
-    echo "    @{ Name = \"manager\";   IP = \"$host_ip\" },"
-    echo "    @{ Name = \"indexer\";   IP = \"$host_ip\" },"
-    echo "    @{ Name = \"s3\";        IP = \"$host_ip\" },"
-    echo "    @{ Name = \"archive\";   IP = \"$host_ip\" },"
-    echo "    @{ Name = \"sso\";       IP = \"$host_ip\" },"
-    echo "    @{ Name = \"misp\";      IP = \"$host_ip\" },"
-    echo "    @{ Name = \"iris\";      IP = \"$host_ip\" },"
-    # per-node records (docker: all = host_ip; baremetal: per-node IPs)
-    awk '/- name:/{n=$3}/hostname:/{h=$2}/ip:/{print n, h, $2}' "$NODES" | \
-    while read -r name fqdn ip; do
-      [[ "$ip" == "docker-internal" ]] && ip="$host_ip"
-      [[ "$ip" == "REPLACE_ME" ]] && ip="CHANGE_ME"
-      local short="${fqdn%%.$zone}"
-      [[ "$short" == "$fqdn" ]] && continue   # hostname not under the zone
-      echo "    @{ Name = \"$short\"; IP = \"$ip\" },"
-    done | sed '$ s/,$//'
+    echo "$body"
     echo ")"
     cat <<'PS1'
 
+$cs = @{}
+if ($DnsServer) { $cs['ComputerName'] = $DnsServer }
+if (-not $Apply) { Write-Host "DRY RUN - re-run with -Apply to write these changes.`n" }
+
+if (-not (Get-DnsServerZone -Name $zone @cs -ErrorAction SilentlyContinue)) {
+    if ($Apply) { Add-DnsServerPrimaryZone -Name $zone -ReplicationScope "Forest" @cs }
+    Write-Host "[ZONE] create $zone (forest-replicated primary)"
+}
+
 foreach ($r in $records) {
-    $existing = Get-DnsServerResourceRecord -ZoneName $zone -Name $r.Name -RRType A -ErrorAction SilentlyContinue
-    if ($existing) { Remove-DnsServerResourceRecord -ZoneName $zone -Name $r.Name -RRType A -Force }
-    Add-DnsServerResourceRecordA -ZoneName $zone -Name $r.Name -IPv4Address $r.IP
-    Write-Host "[OK] $($r.Name).$zone -> $($r.IP)"
+    $existing = @(Get-DnsServerResourceRecord -ZoneName $zone -Name $r.Name -RRType A @cs -ErrorAction SilentlyContinue)
+
+    if ($existing | Where-Object { $_.RecordData.IPv4Address.IPAddressToString -eq $r.IP }) {
+        Write-Host "[SKIP] $($r.Name).$zone already -> $($r.IP)"
+        continue
+    }
+
+    # Remove only the records that actually hold a different address, matched on
+    # record data - a bare -RRType removal would take every A record at this
+    # owner name with it (for "@" in a live AD zone, that is every DC).
+    foreach ($old in $existing) {
+        $oldIp = $old.RecordData.IPv4Address.IPAddressToString
+        if ($Apply) {
+            Remove-DnsServerResourceRecord -ZoneName $zone -Name $r.Name -RRType A -RecordData $oldIp -Force @cs
+        }
+        Write-Host "[DEL ] $($r.Name).$zone -x- $oldIp"
+    }
+
+    if ($Apply) { Add-DnsServerResourceRecordA -ZoneName $zone -Name $r.Name -IPv4Address $r.IP @cs }
+    Write-Host "[ADD ] $($r.Name).$zone -> $($r.IP)"
 }
 PS1
   } > config/dns/add-dns-records.ps1
 
   # ---- hosts-file fallback (Linux /etc/hosts, Windows drivers\etc\hosts) ----
+  # Same record set as the PS1, grouped one line per address.
   {
     echo "# Append to /etc/hosts (Linux) or C:\\Windows\\System32\\drivers\\etc\\hosts (Windows)"
     echo "# on every client/agent if no DNS zone is available."
-    echo "$host_ip  $zone dashboard.$zone manager.$zone indexer.$zone s3.$zone archive.$zone sso.$zone misp.$zone iris.$zone"
+    while read -r ip; do
+      [[ -n "$ip" ]] || continue
+      printf '%s ' "$ip"
+      while read -r name pair; do
+        [[ "$pair" == "$ip" ]] || continue
+        [[ "$name" == "@" ]] && printf '%s ' "$zone" || printf '%s.%s ' "$name" "$zone"
+      done <<< "$recs"
+      printf '\n'
+    done < <(awk '{print $2}' <<< "$recs" | awk 'NF' | sort -u)
   } > config/dns/hosts.snippet
 
   ok "wrote config/dns/add-dns-records.ps1  (run on the Windows DNS server)"
   ok "wrote config/dns/hosts.snippet        (hosts-file fallback)"
-  [[ -n "$(cfg dns server)" ]] && say "    DNS server on record: $(cfg dns server)"
+  say "    the PS1 is a dry run until you pass -Apply"
+  [[ "$skipped" -eq 0 ]] || warn "$skipped node(s) had no ip in $NODES - fill them in and re-run"
+  [[ -z "$(cfg dns server)" ]] || say "    DNS server on record: $(cfg dns server)"
+  return 0
 }
 
 # =================================================================== maps ====

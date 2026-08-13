@@ -66,10 +66,22 @@ Generate them rather than typing them:
 # -> config/dns/hosts.snippet         hosts-file fallback for clients without DNS
 ```
 
-Inputs are `wazuh.domain` and `dns.host_ip` from `config/deployment.yml`. The
-script creates the zone if absent (`Add-DnsServerPrimaryZone -ReplicationScope
-"Forest"`), then for each record removes any existing A record and re-adds it,
-so it is safe to re-run after an IP change.
+Inputs are `wazuh.domain` and `dns.host_ip` from `config/deployment.yml`.
+
+The PowerShell script is a **dry run by default** — it prints every change it
+would make and writes nothing until you pass `-Apply`:
+
+```powershell
+.\add-dns-records.ps1                                     # preview
+.\add-dns-records.ps1 -Apply                              # apply, on the DNS server
+.\add-dns-records.ps1 -Apply -DnsServer dc1.corp.example.com
+```
+
+It creates the zone if absent (`Add-DnsServerPrimaryZone -ReplicationScope
+"Forest"`), skips records that already hold the right address, and replaces
+stale ones **matched on record data** — so an unrelated A record at the same
+owner name is never collaterally deleted. Re-running after an IP change is
+safe.
 
 **A records only** — no CNAME, no PTR, no SRV, no TTL override. If your tooling
 needs reverse lookups, create the `in-addr.arpa` zone and PTR records by hand.
@@ -156,11 +168,12 @@ CSR time. Three postures:
 | **B. Delegated child zone** | set `wazuh.domain: siem.corp.example.com`, re-run `configure` → `pki csr` → `sign` → `verify` | full certificate re-issue (SANs change) + update `sso-clients.conf` |
 | **C. Records inside the live AD domain zone** | create the six names **by hand** | see the warning below |
 
-> **Never run the generated script against your production AD domain zone.**
-> It removes existing A records at each owner name *without* matching on record
-> data, so for `Name = "@"` in a live AD zone it would delete every domain
-> controller's apex A record before adding one. Option C is hand-created records
-> only.
+> **Preview before applying inside a live AD domain zone.** The script matches
+> on record data and skips already-correct entries, so it will not collaterally
+> delete unrelated records — but `Name = "@"` in a domain zone is still the
+> apex your domain controllers publish. Run it without `-Apply` first and read
+> the `[DEL ]` lines; if any of them name an address you did not expect, create
+> the six records by hand instead.
 
 Related pitfalls:
 
@@ -179,22 +192,17 @@ Related pitfalls:
 | Browser trusts nothing / `ERR_CERT_AUTHORITY_INVALID` | `root-ca.pem` is not in the client trust store |
 | Certificate name mismatch when dialing the **IP** | there are no IP SANs anywhere in this stack, and none can be added through the inventory — always connect by name |
 | `curl https://manager.<domain>:55000` from the VM fails | the API is loopback-bound; AD resolves the name to the host IP. Use `--resolve` or a hosts entry |
-| `add-dns-records.ps1` fails to parse | `config/nodes.yml` is stale or missing, which leaves a trailing comma in the PowerShell array. Re-run `./wazuh-deploy.sh configure`, then `dns records` |
-| Some records missing after a bare-metal run | node IPs left as `REPLACE_ME` are emitted as the literal `CHANGE_ME`, and those entries fail after the valid record was already removed. Fill in every `ip:` in `config/nodes.yml` first |
+| `no config/nodes.yml` when running `dns records` | run `./wazuh-deploy.sh configure` first — it writes `nodes.yml` alongside `deployment.yml` |
+| `[WARN] N node(s) had no ip` on bare metal | those nodes still carry `ip: REPLACE_ME` in `config/nodes.yml`. They are skipped rather than emitted as broken records — fill the addresses in and re-run |
+| Nothing changed after running the PS1 | it is a dry run until you pass `-Apply` |
 
-## Known issues in the generator
+## Notes on the generator
 
-These are defects in `wazuh-deploy.sh cmd_dns`, not in your DNS configuration:
-
-- Unfilled bare-metal IPs become the literal string `CHANGE_ME`; because those
-  duplicate entries run *after* the valid static ones, the remove succeeds and
-  the add fails, leaving those names with **no** A record.
-- `dns records` exits non-zero on a default config, after successfully writing
-  both files, because its last statement tests an empty `dns.server` under
-  `set -e`. This breaks CI and `&&` chains.
-- A missing `config/nodes.yml` truncates the output file mid-write; the guard
-  that `validate` has is absent here.
-- Records are replaced destructively rather than updated in place, so a manually
-  added second IP (round-robin) is silently dropped, and there is a brief window
-  with no record.
-- `dns.mode` is never read back, and `dns.server` is print-only.
+- `dns.mode` is not read back after `configure`, and `dns.server` is
+  informational only — pass `-DnsServer` to the PowerShell script to target a
+  remote DNS server, otherwise it acts on the machine it runs on.
+- Node records whose `ip:` is unset are skipped with a warning, so a
+  partly-filled `nodes.yml` produces a valid script covering the rest.
+- Public aliases win over per-node entries that resolve to the same short name,
+  so `indexer` is emitted once even though both coordinators carry
+  `indexer.<domain>` as a SAN.
