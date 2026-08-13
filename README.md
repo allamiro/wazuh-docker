@@ -47,6 +47,7 @@ password printed by `generate-credentials.sh` (stored in `multi-node/.env`).
 | Docker specifics | [docs/DOCKER.md](docs/DOCKER.md) |
 | VM / bare-metal specifics | [docs/BAREMETAL.md](docs/BAREMETAL.md) |
 | PKI deep reference | [docs/PKI.md](docs/PKI.md) |
+| DNS / AD records, one IP many URLs | [docs/DNS.md](docs/DNS.md) |
 | Long-term retention (RustFS S3 archive) | [docs/ARCHIVE.md](docs/ARCHIVE.md) |
 | Rootless Podman / SELinux hosts | [docs/PODMAN.md](docs/PODMAN.md) |
 | SOC tier: MISP + DFIR-IRIS (SSO) | [docs/SOC.md](docs/SOC.md) |

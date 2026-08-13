@@ -41,7 +41,11 @@ runs on `<name>.pem` + `<name>-key.pem` + `root-ca.pem` only.** CSRs are kept
 under `csr/` for audit and renewal.
 
 `./wazuh-deploy.sh pki ...` wraps `./generate-certs.sh` — both accept the
-same phases; use whichever entry point you prefer.
+same phases, but they are **not** interchangeable: only `wazuh-deploy.sh`
+reads `config/deployment.yml` and exports the configured zone. Calling
+`./generate-certs.sh csr` directly silently falls back to `siem.local.domain`,
+baking the wrong SANs into every CSR. Always go through `wazuh-deploy.sh`
+unless you set `SIEM_DOMAIN` yourself.
 
 ## The canonical inventory
 
@@ -50,17 +54,26 @@ Every identity is defined **once**, in
 (`name|role|sans|required_ekus`). CSR generation, both bundled CAs, the
 verifier, the deployment adapters and `config/nodes.yml` all derive from it.
 
-**26 certificates total: 1 root CA + 25 leaf identities:**
+**31 certificates total: 1 root CA + 30 leaf identities:**
 
 | # | Identity (CN) | Role | Service / purpose | Required EKUs |
 |---|---|---|---|---|
 | 1 | `SIEM Root CA` | trust anchor | signs everything; key kept offline | — |
-| 2–17 | `master1-3 / hot1-3 / warm1-3 / cold1-3 / ingest1-2 / coord1-2 .indexer` | indexer | node identity for mutual-TLS transport (9300) + HTTPS REST (9200) | serverAuth + clientAuth |
-| 18 | `admin` | admin-client | securityadmin client identity (`authcz.admin_dn`); one per deployment, not per indexer | clientAuth |
-| 19–23 | `wazuh.master`, `wazuh.worker1-4` | filebeat | Filebeat **client** identity → indexers | clientAuth |
-| 24 | `wazuh.master-api` | wazuh-api | Wazuh API server cert on 55000 (replaces the self-signed one the API otherwise generates) | serverAuth |
-| 25 | `wazuh.master-enrollment` | authd | agent-enrollment server cert on 1515 (`sslmanager.cert`) | serverAuth |
-| 26 | `wazuh.dashboard` | dashboard | HTTPS cert browsers see on 443 | serverAuth |
+| 2–18 | `master1-3 / hot1-3 / warm1-3 / cold1-3 / ingest1-2 / coord1-2 / ml1 .indexer` (17) | indexer | node identity for mutual-TLS transport (9300) + HTTPS REST (9200) | serverAuth + clientAuth |
+| 19 | `admin` | admin-client | securityadmin client identity (`authcz.admin_dn`); one per deployment, not per indexer | clientAuth |
+| 20–24 | `wazuh.master`, `wazuh.worker1-4` | filebeat | Filebeat **client** identity → indexers | clientAuth |
+| 25 | `wazuh.master-api` | wazuh-api | Wazuh API server cert on 55000 (replaces the self-signed one the API otherwise generates) | serverAuth |
+| 26 | `wazuh.master-enrollment` | authd | agent-enrollment server cert on 1515 (`sslmanager.cert`) | serverAuth |
+| 27 | `wazuh.dashboard` | dashboard | HTTPS cert browsers see on 443; also mounted into nginx as the maps vhost cert (`maps.pem`, same hostname) | serverAuth |
+| 28 | `rustfs` | s3-server | RustFS S3 archive endpoint (`s3.<domain>`, `archive.<domain>`) | serverAuth |
+| 29 | `keycloak` | sso | Keycloak OIDC provider on 8443 (`sso.<domain>`) | serverAuth |
+| 30 | `misp` | soc-web | MISP, behind the nginx vhost on 8081 | serverAuth |
+| 31 | `iris` | soc-web | DFIR-IRIS, behind the nginx vhost on 8082 | serverAuth |
+
+`coord1.indexer` and `coord2.indexer` both carry the shared SAN
+`indexer.<domain>`, so either coordinator can serve that endpoint.
+`ml1.indexer` is a full cluster member and needs the same transport EKUs as
+any other indexer node — a server-only cert breaks it out of the cluster.
 
 Not X.509 by design: the Wazuh manager cluster (1516) uses the shared 32-char
 cluster key; agent events (1514) use the Wazuh agent protocol.
@@ -182,6 +195,16 @@ issuance.** With a corporate CA no CA key ever exists on this host.
 ## Renewal
 
 Delete the expiring `<name>.pem` → re-run `pki sign` (bundled) or re-submit
-the retained CSR (corporate) → `pki verify` → restart the affected service.
-One indexer at a time keeps the cluster green. Keys/CSRs are reused unless
-`pki csr --force`.
+the retained CSR (corporate) → `pki verify` → **recreate** the affected
+service: `docker compose up -d --force-recreate <service>`. A plain `restart`
+keeps serving the old certificate, because certificates are bind-mounted as
+single files and openssl replaces the inode rather than writing in place.
+Recreating the dashboard also means recreating nginx, which mounts the
+dashboard certificate for its maps vhost. One indexer at a time keeps the
+cluster green. Keys/CSRs are reused unless `pki csr --force`.
+
+`--force` is all-or-nothing: it regenerates **every** private key, which
+invalidates all 30 existing certificates. To re-issue a single identity,
+delete just that identity's `csr/<name>.csr` and `<name>.pem`, then run
+`pki csr` and `pki sign` without `--force` — the per-file existence guards
+skip everything else and the private key survives.
